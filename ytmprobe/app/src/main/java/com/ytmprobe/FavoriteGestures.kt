@@ -51,7 +51,8 @@ object FavoriteGestures {
         row.setOnTouchListener { _, event -> gestures.onTouchEvent(event); false }
     }
 
-    private fun removeFavorite(ctx: Activity, f: Favorites.Fav, onChanged: () -> Unit) {
+    /** Also called directly by LaunchV2Activity's ItemTouchHelper swipe callback. */
+    fun removeFavorite(ctx: Activity, f: Favorites.Fav, onChanged: () -> Unit) {
         Favorites.remove(ctx, f.key)
         ProbeLog.w(ctx, "removed favorite (swipe): ${f.label()}")
         onChanged()

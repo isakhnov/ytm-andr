@@ -30,4 +30,8 @@ dependencies {
     implementation("androidx.media:media:1.7.0")
     implementation("androidx.car.app:app:1.4.0")
     implementation("androidx.car.app:app-projected:1.4.0")
+    // Launch v2 only — ItemTouchHelper properly disambiguates a row's
+    // horizontal swipe from the list's vertical scroll, which the manual
+    // GestureDetector approach in FavoriteGestures cannot do reliably.
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
 }

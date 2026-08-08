@@ -20,6 +20,7 @@ abstract class NavActivity : Activity() {
         menu.add(0, 1, 0, "YTM Launch")
         menu.add(0, 2, 1, "YTM Old")
         menu.add(0, 3, 2, "Diagnostics")
+        menu.add(0, 4, 3, "Launch v2")
         return true
     }
 
@@ -27,6 +28,7 @@ abstract class NavActivity : Activity() {
         1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
         2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
         3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
+        4 -> { startActivity(Intent(this, LaunchV2Activity::class.java)); true }
         else -> super.onOptionsItemSelected(item)
     }
 }

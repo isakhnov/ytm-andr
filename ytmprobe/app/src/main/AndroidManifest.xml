@@ -55,6 +55,14 @@
             </intent-filter>
         </activity>
 
+        <!-- "Launch v2" — experimental RecyclerView/ItemTouchHelper rebuild
+             of YTM Launch's swipe gestures; reached only via the 3-dot menu,
+             not a startup screen. -->
+        <activity
+            android:name=".LaunchV2Activity"
+            android:exported="false"
+            android:label="Launch v2" />
+
         <!-- Required to obtain MediaSessionManager.getActiveSessions().
              The service itself does nothing; its existence is what grants
              the app eligibility for Notification Access. -->
