@@ -104,7 +104,8 @@ logger shows a session on AA connect  ->  B1 and D stop mattering
 
 | File | Role |
 |---|---|
-| `MainActivity.kt` | one screen, buttons per probe, live log view |
+| `MainActivity.kt` | day-to-day screen: status strip, AA-shaped favorites list, tracking, live log |
+| `DiagnosticsActivity.kt` | setup, settled probes (A, E, B1, D), and manual videoId override |
 | `Probes.kt` | the four probes and shared session helpers |
 | `SessionLogger.kt` | foreground service, logs session lifecycle |
 | `Favorites.kt` | passively captures liked tracks and stores playable favorites |

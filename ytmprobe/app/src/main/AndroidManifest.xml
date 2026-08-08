@@ -41,6 +41,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:label="Diagnostics" />
+
         <!-- Required to obtain MediaSessionManager.getActiveSessions().
              The service itself does nothing; its existence is what grants
              the app eligibility for Notification Access. -->

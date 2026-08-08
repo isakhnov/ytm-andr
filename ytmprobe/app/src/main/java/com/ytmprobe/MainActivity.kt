@@ -1,39 +1,75 @@
 package com.ytmprobe
 
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
+/**
+ * The day-to-day surface: a passive status readout, a rehearsal of the
+ * Android Auto favorites screen (same 5-random-plus-refresh shape as
+ * ResumeCarAppService.FavoritesScreen — tapping a row plays it directly, no
+ * videoId to see or type), the tracking toggle, and a collapsible log.
+ *
+ * Everything that already answered its question for good (probes A/E/B1/D),
+ * one-time setup (Grant Notification Access), and manual videoId handling
+ * live in DiagnosticsActivity instead of cluttering this screen — see
+ * FINDINGS.md for what each of those settled.
+ */
 class MainActivity : Activity() {
 
     companion object {
-        /** Confirmed working in probe C; used when nothing is stored yet. */
-        const val FALLBACK_VIDEO_ID = "ThqRONlaT_I"
+        /** Live view is trimmed to this many lines; the file on disk is never trimmed. */
+        const val MAX_LOG_LINES = 400
+        /** Force a full rebuild (to actually drop old lines) at most this often. */
+        const val REBUILD_INTERVAL = 100
+        /** How often the status strip re-checks YTM while the screen is visible. */
+        const val STATUS_POLL_MS = 3000L
     }
 
+    private val statusHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    private lateinit var logView: TextView
+    /**
+     * The status strip is otherwise only refreshed on explicit triggers
+     * (open, resume, after tapping a favorite) — nothing pushes an update
+     * when the track changes for any other reason (YTM auto-advancing, a
+     * manual skip in YTM itself). This keeps it live while the app is open.
+     */
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            statusHandler.postDelayed(this, STATUS_POLL_MS)
+        }
+    }
+
+    private lateinit var page: LinearLayout
+    private lateinit var controlsScroll: ScrollView
+    private lateinit var logSection: LinearLayout
     private lateinit var logScroll: ScrollView
+    private lateinit var logView: TextView
+    private lateinit var logToggleBtn: Button
+    private var logExpanded = false
+
+    private val logLines = ArrayDeque<String>()
+    private var appendsSinceRebuild = 0
+
+    private lateinit var statusView: TextView
+    private lateinit var mixHeaderView: TextView
+    private lateinit var favContainer: LinearLayout
     private lateinit var trackBtn: Button
     private lateinit var trackState: TextView
-    private lateinit var videoIdField: EditText
+
+    private var favSample: List<Favorites.Fav> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,15 +78,6 @@ class MainActivity : Activity() {
             runCatching {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
             }
-        }
-
-        videoIdField = EditText(this).apply {
-            hint = "videoId for probe C"
-            inputType = InputType.TYPE_CLASS_TEXT
-            // Prefer the last resolved id; fall back to a known-good one so
-            // probe C is always runnable without typing.
-            setText(Store.loadLast(this@MainActivity)?.videoId
-                ?.takeIf { it.isNotBlank() } ?: FALLBACK_VIDEO_ID)
         }
 
         val root = LinearLayout(this).apply {
@@ -72,138 +99,22 @@ class MainActivity : Activity() {
             root.addView(this)
         }
 
-        header("Setup")
-        btn("1. Grant Notification Access") {
-            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        statusView = TextView(this).apply { setPadding(0, 0, 0, 8) }
+        root.addView(statusView)
+
+        mixHeaderView = TextView(this).apply {
+            text = "YTM original selection"
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 24, 0, 8)
         }
-        btn("Status") { Probes.status(this) }
-
-        header("Probes")
-        btn("A+ — capture, resolve, store  (populates videoId)") {
-            Probes.probeAPlus(this) { vid ->
-                if (vid != null) videoIdField.setText(vid)
-            }
-        }
-        btn("A+ then C — full chain") {
-            Probes.probeAPlus(this) { vid ->
-                if (vid == null) {
-                    ProbeLog.w(this, "  chain stopped: nothing resolved")
-                } else {
-                    videoIdField.setText(vid)
-                    ProbeLog.w(this, "  chaining into probe C in 2s...")
-                    logView.postDelayed({ Probes.probeC(this, vid) }, 2000)
-                }
-            }
-        }
-        btn("Show stored") { Probes.showStore(this) }
-
-        val pickField = EditText(this).apply {
-            hint = "candidate index to force (0-7)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        root.addView(pickField, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        btn("Use candidate #  (override a bad pick)") {
-            val i = pickField.text.toString().trim().toIntOrNull()
-            if (i == null) ProbeLog.w(this, "enter a candidate index first")
-            else Probes.pickCandidate(this, i)?.let { videoIdField.setText(it) }
-        }
-        btn("Clear resolution cache") { Probes.clearCache(this) }
-        btn("Pick from last candidates (list)") {
-            val list = Probes.lastCandidates
-            if (list.isEmpty()) {
-                ProbeLog.w(this, "no candidates — run A+ first")
-            } else {
-                val labels = list.mapIndexed { i, c ->
-                    "%d  %.0f  %s  %s — %s".format(i, c.score, c.durationText(),
-                        c.title.take(34), c.artist.take(18))
-                }.toTypedArray()
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("Pick the correct track")
-                    .setItems(labels) { _, which ->
-                        Probes.pickCandidate(this, which)?.let { videoIdField.setText(it) }
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-            }
-        }
-        btn("A — metadata fields (needs YTM playing)") { Probes.probeA(this) }
-        btn("E — queue contents (needs YTM playing)") { Probes.probeE(this) }
-        btn("B1 — MediaBrowser connect (force-stop YTM first)") { Probes.probeB1(this) }
-        btn("D — MediaButtonReceiver broadcast (force-stop first)") { Probes.probeD(this) }
-
-        root.addView(videoIdField, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        // Programmatic clipboard access. The long-press paste toolbar is
-        // unreliable here, so don't depend on it.
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            val half = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-
-            addView(Button(this@MainActivity).apply {
-                text = "Paste"
-                isAllCaps = false
-                setOnClickListener {
-                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-
-                    // Android 10+ blocks clipboard reads unless the app holds
-                    // window focus. A keyboard or dialog stealing focus makes
-                    // primaryClip come back null with no error.
-                    if (!hasWindowFocus()) {
-                        ProbeLog.w(this@MainActivity,
-                            "clipboard: no window focus — tap the app background first")
-                        return@setOnClickListener
-                    }
-
-                    val hasClip = cm.hasPrimaryClip()
-                    val desc = cm.primaryClipDescription
-                    ProbeLog.w(this@MainActivity,
-                        "clipboard: hasClip=$hasClip label=${desc?.label} " +
-                                "items=${cm.primaryClip?.itemCount ?: 0}")
-
-                    val t = cm.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)
-                        ?.toString()?.trim()
-                    if (t.isNullOrBlank()) {
-                        ProbeLog.w(this@MainActivity,
-                            "clipboard empty or unreadable (Android 10+ restricts " +
-                                    "reads to the focused app)")
-                    } else {
-                        // Accept a bare id or a full watch URL.
-                        val id = Regex("[?&]v=([A-Za-z0-9_-]{11})").find(t)?.groupValues?.get(1)
-                            ?: Regex("youtu\\.be/([A-Za-z0-9_-]{11})").find(t)?.groupValues?.get(1)
-                            ?: Regex("^[A-Za-z0-9_-]{11}$").find(t)?.value
-                            ?: t
-                        videoIdField.setText(id)
-                        ProbeLog.w(this@MainActivity, "pasted videoId: $id")
-                    }
-                }
-            }, half)
-
-            addView(Button(this@MainActivity).apply {
-                text = "Use stored"
-                isAllCaps = false
-                setOnClickListener {
-                    val v = Store.loadLast(this@MainActivity)?.videoId
-                    if (v.isNullOrBlank()) ProbeLog.w(this@MainActivity, "no stored videoId")
-                    else { videoIdField.setText(v); ProbeLog.w(this@MainActivity, "using stored: $v") }
-                }
-            }, half)
-
-            addView(Button(this@MainActivity).apply {
-                text = "Copy"
-                isAllCaps = false
-                setOnClickListener {
-                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(
-                        ClipData.newPlainText("videoId", videoIdField.text.toString().trim()))
-                    ProbeLog.w(this@MainActivity, "copied to clipboard")
-                }
-            }, half)
-
-            root.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        }
-
-        btn("C — playFromUri on live session") {
-            Probes.probeC(this, videoIdField.text.toString().trim())
+        root.addView(mixHeaderView)
+        favContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(favContainer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        btn("Refresh") {
+            // Resolves anything captured since the last refresh (quietly) before
+            // reshuffling, so a track liked mid-session shows up immediately
+            // instead of waiting for a separate "resolve" step.
+            Probes.resolveFavorites(this, quiet = true) { _, _ -> reloadFavorites() }
         }
 
         header("Tracking  (sessions + favorites, polls every 10s)")
@@ -224,14 +135,13 @@ class MainActivity : Activity() {
         }
         root.addView(trackBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        header("Favorites")
-        btn("Pick a favorite  (10 random, refreshable)") { showFavoritePicker() }
-        btn("Resolve favorites") { Probes.resolveFavorites(this) }
-        btn("Show favorites") { Probes.showFavorites(this) }
+        btn("Diagnostics") {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
 
-        header("Log")
-        btn("Refresh") { showLog() }
-        btn("Clear") { ProbeLog.clear(this); showLog() }
+        // --- log section: built separately from `root` so it can sit in its
+        // own scroll region below the controls (see the note further down on
+        // why two ScrollViews, not one nested inside the other). ---
 
         logView = TextView(this).apply {
             typeface = Typeface.MONOSPACE
@@ -244,38 +154,98 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#F2F2F2"))
             setPadding(8, 8, 8, 8)
         }
-        TextView(this).apply {
+
+        val logControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(this@MainActivity).apply {
+                text = "Refresh log"
+                isAllCaps = false
+                setOnClickListener { loadLogFromFile() }
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(Button(this@MainActivity).apply {
+                text = "Clear log"
+                isAllCaps = false
+                setOnClickListener {
+                    ProbeLog.clear(this@MainActivity)
+                    logLines.clear()
+                    logView.text = ""
+                }
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+
+        val logHint = TextView(this).apply {
             text = "adb pull /sdcard/Android/data/com.ytmprobe/files/probe.log"
             textSize = 9f
             gravity = Gravity.CENTER
             setPadding(0, 8, 0, 0)
-            root.addView(this)
+        }
+
+        logSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(logControls, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
+            addView(logHint, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
         // Two independent scroll regions side by side vertically. Previously
         // the log ScrollView sat INSIDE an outer ScrollView with weight=1,
         // which is meaningless (a ScrollView gives children unbounded height)
         // and broke touch handling — including the paste toolbar.
-        val controls = ScrollView(this).apply { addView(root) }
+        controlsScroll = ScrollView(this).apply { addView(root) }
 
-        val page = LinearLayout(this).apply {
+        // A fixed bar, NOT inside controlsScroll's scrollable content — the
+        // toggle must stay reachable in one tap regardless of how far the
+        // controls pane is scrolled or how tall the favorites list is.
+        logToggleBtn = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                logExpanded = !logExpanded
+                applyLogVisibility()
+            }
+        }
+        val logToggleBar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(controls, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 3f })
-            addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 2f })
+            setPadding(24, 8, 24, 8)
+            addView(logToggleBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(controlsScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
+            addView(logToggleBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(logSection, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 0f })
         }
         setContentView(page)
+        applyLogVisibility()
 
-        ProbeLog.setListener { runOnUiThread { showLog() } }
-        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState() } }
+        ProbeLog.setListener { line -> runOnUiThread { appendLogLine(line) } }
+        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState(); refreshStatus() } }
 
         // Tracking starts with the app; the button exists to stop it.
         if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
         refreshTrackState()
+        refreshStatus()
 
-        // Fill any blank favorite IDs quietly in the background.
-        Probes.resolveFavorites(this, quiet = true)
+        // One-time static read of whatever YTM is already playing, if
+        // anything — not live, never re-read after this; playFavorite()
+        // overwrites it the moment an explicit selection is made.
+        run {
+            val c0 = Probes.ytmController(this)
+            val t0 = c0?.metadata?.description?.title?.toString()
+            val a0 = c0?.metadata?.description?.subtitle?.toString()
+            mixHeaderView.text = when {
+                t0.isNullOrBlank() -> "YTM original selection"
+                a0.isNullOrBlank() -> "Mix: $t0"
+                else -> "Mix: $t0 by $a0"
+            }
+        }
 
-        showLog()
+        // Fill any blank favorite IDs quietly in the background, then show
+        // a sample — same shape the car will show once this app connects.
+        reloadFavorites()
+        Probes.resolveFavorites(this, quiet = true) { _, _ -> reloadFavorites() }
+
+        loadLogFromFile()
     }
 
     private fun startTracking() {
@@ -294,48 +264,135 @@ class MainActivity : Activity() {
             "○ tracking stopped   —   ${Favorites.count(this)} favorite(s)"
     }
 
+    /** YTM session + notification access, at a glance — replaces the old Status button. */
+    private fun refreshStatus() {
+        val c = Probes.ytmController(this)
+
+        val sb = StringBuilder()
+        if (!Probes.hasNotificationAccess(this)) {
+            sb.append("⚠ Notification access needed — see Diagnostics\n")
+        }
+        sb.append(
+            if (c != null) "Playing: ${c.metadata?.description?.title ?: "?"}"
+            else "Not playing"
+        )
+        statusView.text = sb.toString().trim()
+    }
+
     /**
-     * 10 random favorites, title — artist only. Resolves the visible set
-     * first and drops anything that fails, so no unplayable row is shown.
+     * Same shape as ResumeCarAppService.FavoritesScreen: up to
+     * FavoritesScreen.ROWS random *resolved* favorites, tap to play instantly.
      */
-    private fun showFavoritePicker() {
-        if (Favorites.count(this) == 0) {
-            ProbeLog.w(this, "no favorites yet — like a track while tracking is active")
+    private fun reloadFavorites() {
+        favSample = Favorites.all(this)
+            .filter { it.videoId.isNotBlank() }
+            .shuffled()
+            .take(FavoritesScreen.ROWS)
+        renderFavorites()
+    }
+
+    private fun renderFavorites() {
+        favContainer.removeAllViews()
+        if (favSample.isEmpty()) {
+            TextView(this).apply {
+                text = if (Favorites.count(this@MainActivity) == 0)
+                    "no favorites yet — thumbs-up a track while tracking is active"
+                else "no favorites resolved yet — tap Refresh"
+                setPadding(0, 0, 0, 8)
+            }.also { favContainer.addView(it) }
             return
         }
-        ProbeLog.w(this, "favorites picker: resolving unresolved entries...")
-        Probes.resolveFavorites(this, quiet = true) { _, _ ->
-            val sample = Favorites.randomSample(this, 10).filter { it.videoId.isNotBlank() }
-            if (sample.isEmpty()) {
-                ProbeLog.w(this, "no favorites could be resolved — check connectivity")
-                return@resolveFavorites
-            }
-            val labels = sample.map { it.label() }.toTypedArray()
-            android.app.AlertDialog.Builder(this)
-                .setTitle("Pick a favorite")
-                .setItems(labels) { _, which ->
-                    val f = sample[which]
-                    videoIdField.setText(f.videoId)
-                    ProbeLog.w(this, "selected favorite: ${f.label()}  ${f.videoId}")
-                }
-                .setNeutralButton("Refresh") { d, _ -> d.dismiss(); showFavoritePicker() }
-                .setNegativeButton("Cancel", null)
-                .show()
+        favSample.forEach { f ->
+            Button(this).apply {
+                text = f.label()
+                isAllCaps = false
+                setOnClickListener { playFavorite(f) }
+            }.also { favContainer.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }
         }
+    }
+
+    private fun playFavorite(f: Favorites.Fav) {
+        ProbeLog.w(this, "playing favorite: ${f.label()}  ${f.videoId}")
+        // Self-authored, not read from YTM: dumpsys confirmed queueTitle never
+        // carries the mix name ("Adieu Mix" showed in YTM's own UI while
+        // queueTitle stayed "Up next") — so there's nothing reliable to pull.
+        // We already know exactly what we selected; use that directly.
+        mixHeaderView.text = "Mix: ${f.title} by ${f.artist}"
+        Probes.probeC(this, f.videoId)
+        logView.postDelayed({ refreshStatus() }, 1500)
+    }
+
+    // -------------------------------------------------------------- log
+
+    private fun applyLogVisibility() {
+        logSection.visibility = if (logExpanded) View.VISIBLE else View.GONE
+        (controlsScroll.layoutParams as LinearLayout.LayoutParams).weight = if (logExpanded) 3f else 1f
+        (logSection.layoutParams as LinearLayout.LayoutParams).weight = if (logExpanded) 2f else 0f
+        logToggleBtn.text = if (logExpanded) "▾ Hide log" else "▸ Show log"
+        page.requestLayout()
+        if (logExpanded) scrollLogToBottom()
+    }
+
+    /** Full resync from the on-disk file — used for the initial load and manual "Refresh log". */
+    private fun loadLogFromFile() {
+        logLines.clear()
+        ProbeLog.read(this).lineSequence().forEach { logLines.addLast(it) }
+        trimLogLines()
+        renderLogLines()
+    }
+
+    private fun trimLogLines() {
+        while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
+    }
+
+    private fun renderLogLines() {
+        logView.text = logLines.joinToString("\n")
+        appendsSinceRebuild = 0
+        scrollLogToBottom()
+    }
+
+    /**
+     * Called on every single ProbeLog.w() in the app, which can fire in fast
+     * bursts (e.g. resolving several favorites at once). Appending the one
+     * new line is far cheaper than re-reading the whole file and resetting
+     * the TextView each time — that repeated full reset was why the log
+     * previously looked "stuck" scrolling during a burst. Old lines are only
+     * actually dropped from the view every REBUILD_INTERVAL lines, not on
+     * every single append, to keep the common case cheap.
+     */
+    private fun appendLogLine(line: String) {
+        logLines.addLast(line)
+        appendsSinceRebuild++
+        if (logLines.size > MAX_LOG_LINES || appendsSinceRebuild >= REBUILD_INTERVAL) {
+            trimLogLines()
+            renderLogLines()
+        } else {
+            logView.append(line + "\n")
+            scrollLogToBottom()
+        }
+    }
+
+    /**
+     * A single post-then-scroll can run before the TextView has finished
+     * re-measuring the new (taller) content, landing short of the real
+     * bottom. Nesting the post ensures the layout pass triggered by the text
+     * change has actually completed first.
+     */
+    private fun scrollLogToBottom() {
+        if (!logExpanded) return
+        logScroll.post { logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
     }
 
     override fun onResume() {
         super.onResume()
         refreshTrackState()
-        if (videoIdField.text.isNullOrBlank()) {
-            videoIdField.setText(Store.loadLast(this)?.videoId
-                ?.takeIf { it.isNotBlank() } ?: FALLBACK_VIDEO_ID)
-        }
+        refreshStatus()
+        statusHandler.post(statusPoll)
     }
 
-    private fun showLog() {
-        logView.text = ProbeLog.read(this)
-        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+    override fun onPause() {
+        statusHandler.removeCallbacks(statusPoll)
+        super.onPause()
     }
 
     override fun onDestroy() {
