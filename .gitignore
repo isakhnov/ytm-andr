@@ -1,0 +1,15 @@
+.DS_Store
+
+# Android/Gradle build state
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+
+# Device-specific runtime output
+probe.log
+
+# IDE files
+.idea/
+*.iml
