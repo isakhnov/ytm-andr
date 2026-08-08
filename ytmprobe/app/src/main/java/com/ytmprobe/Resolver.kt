@@ -191,8 +191,8 @@ object Resolver {
             .split(" ").filter { it.isNotBlank() }.joinToString(" ")
     }
 
-    /** Longest-common-subsequence ratio, 0..1. */
-    private fun ratio(a: String, b: String): Double {
+    /** Longest-common-subsequence ratio, 0..1. Not private — GenreTagger reuses it too. */
+    fun ratio(a: String, b: String): Double {
         if (a.isEmpty() || b.isEmpty()) return 0.0
         if (a == b) return 1.0
         val prev = IntArray(b.length + 1)

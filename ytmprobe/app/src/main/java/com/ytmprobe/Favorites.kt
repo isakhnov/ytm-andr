@@ -16,6 +16,24 @@ object Favorites {
     private const val PREFS = "ytmprobe"
     private const val KEY = "favorites"
 
+    /**
+     * YTM exposes no genre anywhere (probe A's 9 metadata keys don't include
+     * one, and InnerTube search results don't carry one either) — this is a
+     * fixed set, derived from a real survey of this library against iTunes'
+     * search API cross-checked by hand (see conversation notes), not
+     * something pulled from YTM. "Russian" absorbs anything in Cyrillic
+     * script regardless of its actual iTunes genre — iTunes' catalog has no
+     * reliable language/regional dimension, so nearly every Cyrillic-artist
+     * track just came back generic "Rock" there, which wasn't a useful
+     * distinction for this library. Kept as a plain list so the picker UI
+     * stays a simple tap-to-choose dialog (see GenreTagger, MainActivity's
+     * showGenreTagPicker) — never free text.
+     */
+    val GENRES = listOf(
+        "Rock", "Russian", "Metal", "Alternative", "Pop", "Country", "Electronic", "Classical",
+        "Uncategorized"
+    )
+
     private fun prefs(ctx: Context) =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -28,13 +46,15 @@ object Favorites {
         var videoId: String,
         val addedAt: Long,
         var lastSeenAt: Long,
-        var playCount: Int
+        var playCount: Int,
+        var genre: String = ""
     ) {
         fun toJson(): JSONObject = JSONObject().apply {
             put("key", key); put("title", title); put("artist", artist)
             put("album", album); put("durationMs", durationMs)
             put("videoId", videoId); put("addedAt", addedAt)
             put("lastSeenAt", lastSeenAt); put("playCount", playCount)
+            put("genre", genre)
         }
 
         companion object {
@@ -42,7 +62,8 @@ object Favorites {
                 o.optString("key"), o.optString("title"), o.optString("artist"),
                 o.optString("album"), o.optLong("durationMs"),
                 o.optString("videoId"), o.optLong("addedAt"),
-                o.optLong("lastSeenAt"), o.optInt("playCount")
+                o.optLong("lastSeenAt"), o.optInt("playCount"),
+                o.optString("genre")
             )
         }
 
@@ -141,6 +162,8 @@ object Favorites {
 
     fun unresolved(ctx: Context): List<Fav> = all(ctx).filter { it.videoId.isBlank() }
 
+    fun unGenred(ctx: Context): List<Fav> = all(ctx).filter { it.genre.isBlank() }
+
     /** Never touches an entry that already has an id — manual picks are permanent. */
     fun setVideoId(ctx: Context, key: String, videoId: String) {
         val list = all(ctx)
@@ -150,11 +173,22 @@ object Favorites {
         save(ctx, list)
     }
 
+    /** Unlike setVideoId, this always overwrites — re-tagging is a normal correction, not a one-shot fill-in. */
+    fun setGenre(ctx: Context, key: String, genre: String) {
+        val list = all(ctx)
+        val f = list.firstOrNull { it.key == key } ?: return
+        f.genre = genre
+        save(ctx, list)
+    }
+
     // -------------------------------------------------------------- picker
 
-    /** Random sample, preferring resolved entries so early lists aren't empty. */
-    fun randomSample(ctx: Context, n: Int): List<Fav> {
-        val list = all(ctx)
+    /**
+     * Random sample, preferring resolved entries so early lists aren't empty.
+     * genre == null means no filter (any genre); otherwise matches exactly.
+     */
+    fun randomSample(ctx: Context, n: Int, genre: String? = null): List<Fav> {
+        val list = all(ctx).filter { genre == null || it.genre == genre }
         if (list.isEmpty()) return emptyList()
         val resolved = list.filter { it.videoId.isNotBlank() }.shuffled()
         val rest = list.filter { it.videoId.isBlank() }.shuffled()

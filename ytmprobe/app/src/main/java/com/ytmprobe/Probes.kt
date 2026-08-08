@@ -523,6 +523,48 @@ object Probes {
         }.start()
     }
 
+    // ------------------------------------------------------------------
+    // Genre tagging: GenreTagger.classify() per untagged favorite. Cyrillic
+    // titles/artists classify instantly (no network call), so only pace
+    // between the ones that actually hit iTunes — otherwise a library
+    // that's mostly Russian-language would wait for no reason.
+    // ------------------------------------------------------------------
+    fun tagGenres(ctx: Context, quiet: Boolean = false, done: (Int, Int) -> Unit = { _, _ -> }) {
+        val todo = Favorites.unGenred(ctx)
+        if (todo.isEmpty()) {
+            if (!quiet) {
+                ProbeLog.section(ctx, "TAG GENRES")
+                ProbeLog.w(ctx, "  nothing to do — all ${Favorites.count(ctx)} tagged")
+            }
+            done(0, 0); return
+        }
+
+        if (!quiet) {
+            ProbeLog.section(ctx, "TAG GENRES")
+            ProbeLog.w(ctx, "  ${todo.size} untagged of ${Favorites.count(ctx)}")
+            ProbeLog.w(ctx, "  paced to avoid iTunes rate limits — this takes a while")
+        }
+
+        val main = Handler(Looper.getMainLooper())
+        Thread {
+            var ok = 0
+            for (f in todo) {
+                val genre = runCatching { GenreTagger.classify(f.title, f.artist) }
+                    .getOrDefault("Uncategorized")
+                Favorites.setGenre(ctx, f.key, genre)
+                ok++
+                if (!quiet) main.post { ProbeLog.w(ctx, "  %-12s %s".format(genre, f.label())) }
+                if (!GenreTagger.isCyrillic(f.title) && !GenreTagger.isCyrillic(f.artist)) {
+                    Thread.sleep(1200)
+                }
+            }
+            main.post {
+                if (!quiet) ProbeLog.w(ctx, "  tagged $ok of ${todo.size}")
+                done(ok, todo.size)
+            }
+        }.start()
+    }
+
     fun showFavorites(ctx: Context) {
         ProbeLog.section(ctx, "FAVORITES")
         Favorites.dump(ctx).lines().forEach { ProbeLog.w(ctx, "  $it") }

@@ -5,38 +5,66 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
+import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 
 /**
- * Everything that already answered its question for good, plus manual
- * videoId handling for the cases the automatic pickers can't cover.
+ * Everything that already answered its question for good, manual videoId
+ * handling for the cases the automatic pickers can't cover, plus the two
+ * cross-cutting concerns shared by every screen: the tracking on/off toggle
+ * and the log. Both used to live on MainActivity alone; they moved here so
+ * they're not duplicated across MainActivity ("YTM Old") and
+ * QuickPlayActivity ("YTM Launch").
  *
  * Probes B1 and D are confirmed dead ends (FINDINGS.md, E9) and A/E are
  * one-time verifications (no MEDIA_ID, no queue mediaId) — kept here only to
- * re-check after a YTM update, not for routine use. See MainActivity for the
- * day-to-day surface.
+ * re-check after a YTM update, not for routine use.
  */
 class DiagnosticsActivity : Activity() {
 
     companion object {
         /** Confirmed working in probe C; used when nothing is stored yet. */
         const val FALLBACK_VIDEO_ID = "ThqRONlaT_I"
+        /** Live view is trimmed to this many lines; the file on disk is never trimmed. */
+        const val MAX_LOG_LINES = 400
+        /** Force a full rebuild (to actually drop old lines) at most this often. */
+        const val REBUILD_INTERVAL = 100
     }
 
     private lateinit var videoIdField: EditText
 
+    private lateinit var trackBtn: Button
+    private lateinit var trackState: TextView
+
+    private lateinit var page: LinearLayout
+    private lateinit var controlsScroll: ScrollView
+    private lateinit var logSection: LinearLayout
+    private lateinit var logScroll: ScrollView
+    private lateinit var logView: TextView
+    private lateinit var logToggleBtn: Button
+    private var logExpanded = false
+
+    private val logLines = ArrayDeque<String>()
+    private var appendsSinceRebuild = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        title = "Diagnostics"
 
         videoIdField = EditText(this).apply {
             hint = "videoId for manual probe C"
@@ -70,6 +98,24 @@ class DiagnosticsActivity : Activity() {
         }
         btn("Status") { Probes.status(this) }
 
+        header("Tracking  (sessions + favorites, polls every 10s)")
+
+        trackState = TextView(this).apply { setPadding(0, 0, 0, 8) }
+        root.addView(trackState)
+
+        trackBtn = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                if (SessionLogger.running) {
+                    stopService(Intent(this@DiagnosticsActivity, SessionLogger::class.java))
+                } else {
+                    startTracking()
+                }
+                logView.postDelayed({ refreshTrackState() }, 400)
+            }
+        }
+        root.addView(trackBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
         header("Raw probes  (settled — see FINDINGS.md)")
         btn("A — metadata fields (needs YTM playing)") { Probes.probeA(this) }
         btn("E — queue contents (needs YTM playing)") { Probes.probeE(this) }
@@ -96,6 +142,7 @@ class DiagnosticsActivity : Activity() {
         btn("Show stored") { Probes.showStore(this) }
         btn("Show favorites") { Probes.showFavorites(this) }
         btn("Clear resolution cache") { Probes.clearCache(this) }
+        btn("Tag genres automatically") { Probes.tagGenres(this) }
 
         header("Manual override")
         btn("Pick from last candidates") {
@@ -203,14 +250,198 @@ class DiagnosticsActivity : Activity() {
             Probes.probeC(this, videoIdField.text.toString().trim())
         }
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        // --- log section: built separately from `root` so it can sit in its
+        // own scroll region below the controls (see the note further down on
+        // why two ScrollViews, not one nested inside the other). ---
+
+        logView = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 10f
+            setTextColor(Color.parseColor("#C8C8C8"))
+            setTextIsSelectable(true)
+        }
+        logScroll = ScrollView(this).apply {
+            addView(logView)
+            setBackgroundColor(Color.parseColor("#1A1A1A"))
+            setPadding(8, 8, 8, 8)
+        }
+
+        val logControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(this@DiagnosticsActivity).apply {
+                text = "Refresh log"
+                isAllCaps = false
+                setOnClickListener { loadLogFromFile() }
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(Button(this@DiagnosticsActivity).apply {
+                text = "Clear log"
+                isAllCaps = false
+                setOnClickListener {
+                    ProbeLog.clear(this@DiagnosticsActivity)
+                    logLines.clear()
+                    logView.text = ""
+                }
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+
+        val logHint = TextView(this).apply {
+            text = "adb pull /sdcard/Android/data/com.ytmprobe/files/probe.log"
+            textSize = 9f
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 0)
+        }
+
+        logSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(logControls, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
+            addView(logHint, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        // Two independent scroll regions side by side vertically. Previously
+        // the log ScrollView sat INSIDE an outer ScrollView with weight=1,
+        // which is meaningless (a ScrollView gives children unbounded height)
+        // and broke touch handling — including the paste toolbar.
+        controlsScroll = ScrollView(this).apply { addView(root) }
+
+        // A fixed bar, NOT inside controlsScroll's scrollable content — the
+        // toggle must stay reachable in one tap regardless of how far the
+        // controls pane is scrolled.
+        logToggleBtn = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                logExpanded = !logExpanded
+                applyLogVisibility()
+            }
+        }
+        val logToggleBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 8, 24, 8)
+            addView(logToggleBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
+        page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(controlsScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
+            addView(logToggleBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(logSection, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 0f })
+        }
+        setContentView(page)
+        applyLogVisibility()
+
+        if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
     }
 
+    private fun startTracking() {
+        val i = Intent(this, SessionLogger::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i)
+        else startService(i)
+    }
+
+    private fun refreshTrackState() {
+        val on = SessionLogger.running
+        trackBtn.text = if (on) "Stop tracking" else "Start tracking"
+        trackState.text = if (on)
+            "● tracking active   —   ${Favorites.count(this)} favorite(s), " +
+                    "${Favorites.resolvedCount(this)} playable"
+        else
+            "○ tracking stopped   —   ${Favorites.count(this)} favorite(s)"
+    }
+
+    // -------------------------------------------------------------- log
+
+    private fun applyLogVisibility() {
+        logSection.visibility = if (logExpanded) View.VISIBLE else View.GONE
+        (controlsScroll.layoutParams as LinearLayout.LayoutParams).weight = if (logExpanded) 3f else 1f
+        (logSection.layoutParams as LinearLayout.LayoutParams).weight = if (logExpanded) 2f else 0f
+        logToggleBtn.text = if (logExpanded) "▾ Hide log" else "▸ Show log"
+        page.requestLayout()
+        if (logExpanded) scrollLogToBottom()
+    }
+
+    /** Full resync from the on-disk file — used for the initial load and manual "Refresh log". */
+    private fun loadLogFromFile() {
+        logLines.clear()
+        ProbeLog.read(this).lineSequence().forEach { logLines.addLast(it) }
+        trimLogLines()
+        renderLogLines()
+    }
+
+    private fun trimLogLines() {
+        while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
+    }
+
+    private fun renderLogLines() {
+        logView.text = logLines.joinToString("\n")
+        appendsSinceRebuild = 0
+        scrollLogToBottom()
+    }
+
+    /**
+     * Called on every single ProbeLog.w() in the app, which can fire in fast
+     * bursts (e.g. resolving several favorites at once). Appending the one
+     * new line is far cheaper than re-reading the whole file and resetting
+     * the TextView each time. Old lines are only actually dropped from the
+     * view every REBUILD_INTERVAL lines, not on every single append, to keep
+     * the common case cheap.
+     */
+    private fun appendLogLine(line: String) {
+        logLines.addLast(line)
+        appendsSinceRebuild++
+        if (logLines.size > MAX_LOG_LINES || appendsSinceRebuild >= REBUILD_INTERVAL) {
+            trimLogLines()
+            renderLogLines()
+        } else {
+            logView.append(line + "\n")
+            scrollLogToBottom()
+        }
+    }
+
+    /**
+     * A single post-then-scroll can run before the TextView has finished
+     * re-measuring the new (taller) content, landing short of the real
+     * bottom. Nesting the post ensures the layout pass triggered by the text
+     * change has actually completed first.
+     */
+    private fun scrollLogToBottom() {
+        if (!logExpanded) return
+        logScroll.post { logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, 1, 0, "YTM Launch")
+        menu.add(0, 2, 1, "YTM Old")
+        menu.add(0, 3, 2, "Diagnostics")
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
+        1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
+        2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
+        3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
+        else -> super.onOptionsItemSelected(item)
+    }
+
+    // ProbeLog/SessionLogger callbacks are single global slots shared with
+    // MainActivity's own copies of this UI — registering in onResume/clearing
+    // in onPause (not onCreate/onDestroy) ensures whichever screen is
+    // actually in front is the one getting live updates, instead of the two
+    // screens fighting over a stale registration.
     override fun onResume() {
         super.onResume()
         if (videoIdField.text.isNullOrBlank()) {
             videoIdField.setText(Store.loadLast(this)?.videoId
                 ?.takeIf { it.isNotBlank() } ?: FALLBACK_VIDEO_ID)
         }
+        ProbeLog.setListener { line -> runOnUiThread { appendLogLine(line) } }
+        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState() } }
+        loadLogFromFile()
+        refreshTrackState()
+    }
+
+    override fun onPause() {
+        ProbeLog.setListener(null)
+        SessionLogger.onStateChange = null
+        super.onPause()
     }
 }

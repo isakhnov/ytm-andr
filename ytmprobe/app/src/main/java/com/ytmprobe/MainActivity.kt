@@ -7,6 +7,8 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -16,10 +18,15 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * The day-to-day surface: a passive status readout, a rehearsal of the
- * Android Auto favorites screen (same 5-random-plus-refresh shape as
- * ResumeCarAppService.FavoritesScreen — tapping a row plays it directly, no
- * videoId to see or type), the tracking toggle, and a collapsible log.
+ * "YTM Old" — the original day-to-day surface: a passive status readout, a
+ * rehearsal of the Android Auto favorites screen (same 5-random-plus-refresh
+ * shape as ResumeCarAppService.FavoritesScreen — tapping a row plays it
+ * directly, no videoId to see or type), the tracking toggle, and a
+ * collapsible log. DiagnosticsActivity has its own copies of the tracking
+ * toggle and log too (they're cross-cutting, not specific to one screen) —
+ * this is not a "moved to Diagnostics" relationship, both screens carry them.
+ * See QuickPlayActivity ("YTM Launch") for the minimal song-selection-only
+ * alternative, which is the app's actual startup screen.
  *
  * Everything that already answered its question for good (probes A/E/B1/D),
  * one-time setup (Grant Notification Access), and manual videoId handling
@@ -66,13 +73,18 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var mixHeaderView: TextView
     private lateinit var favContainer: LinearLayout
+    private lateinit var genreBtn: Button
     private lateinit var trackBtn: Button
     private lateinit var trackState: TextView
 
     private var favSample: List<Favorites.Fav> = emptyList()
 
+    /** null = no filter, show any genre. */
+    private var selectedGenre: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        title = "YTM Old"
 
         if (Build.VERSION.SDK_INT >= 33) {
             runCatching {
@@ -110,12 +122,13 @@ class MainActivity : Activity() {
         root.addView(mixHeaderView)
         favContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(favContainer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        btn("Refresh") {
+        genreBtn = btn("Refresh: All") {
             // Resolves anything captured since the last refresh (quietly) before
             // reshuffling, so a track liked mid-session shows up immediately
             // instead of waiting for a separate "resolve" step.
             Probes.resolveFavorites(this, quiet = true) { _, _ -> reloadFavorites() }
         }
+        genreBtn.setOnLongClickListener { showGenrePicker(); true }
 
         header("Tracking  (sessions + favorites, polls every 10s)")
 
@@ -135,10 +148,6 @@ class MainActivity : Activity() {
         }
         root.addView(trackBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        btn("Diagnostics") {
-            startActivity(Intent(this, DiagnosticsActivity::class.java))
-        }
-
         // --- log section: built separately from `root` so it can sit in its
         // own scroll region below the controls (see the note further down on
         // why two ScrollViews, not one nested inside the other). ---
@@ -146,12 +155,12 @@ class MainActivity : Activity() {
         logView = TextView(this).apply {
             typeface = Typeface.MONOSPACE
             textSize = 10f
-            setTextColor(Color.DKGRAY)
+            setTextColor(Color.parseColor("#C8C8C8"))
             setTextIsSelectable(true)
         }
         logScroll = ScrollView(this).apply {
             addView(logView)
-            setBackgroundColor(Color.parseColor("#F2F2F2"))
+            setBackgroundColor(Color.parseColor("#1A1A1A"))
             setPadding(8, 8, 8, 8)
         }
 
@@ -218,9 +227,6 @@ class MainActivity : Activity() {
         setContentView(page)
         applyLogVisibility()
 
-        ProbeLog.setListener { line -> runOnUiThread { appendLogLine(line) } }
-        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState(); refreshStatus() } }
-
         // Tracking starts with the app; the button exists to stop it.
         if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
         refreshTrackState()
@@ -244,8 +250,6 @@ class MainActivity : Activity() {
         // a sample — same shape the car will show once this app connects.
         reloadFavorites()
         Probes.resolveFavorites(this, quiet = true) { _, _ -> reloadFavorites() }
-
-        loadLogFromFile()
     }
 
     private fun startTracking() {
@@ -282,10 +286,12 @@ class MainActivity : Activity() {
     /**
      * Same shape as ResumeCarAppService.FavoritesScreen: up to
      * FavoritesScreen.ROWS random *resolved* favorites, tap to play instantly.
+     * Restricted to selectedGenre when one is chosen (see showGenrePicker).
      */
     private fun reloadFavorites() {
         favSample = Favorites.all(this)
             .filter { it.videoId.isNotBlank() }
+            .filter { selectedGenre == null || it.genre == selectedGenre }
             .shuffled()
             .take(FavoritesScreen.ROWS)
         renderFavorites()
@@ -295,20 +301,70 @@ class MainActivity : Activity() {
         favContainer.removeAllViews()
         if (favSample.isEmpty()) {
             TextView(this).apply {
-                text = if (Favorites.count(this@MainActivity) == 0)
-                    "no favorites yet — thumbs-up a track while tracking is active"
-                else "no favorites resolved yet — tap Refresh"
+                text = when {
+                    Favorites.count(this@MainActivity) == 0 ->
+                        "no favorites yet — thumbs-up a track while tracking is active"
+                    selectedGenre != null -> "no favorites tagged \"$selectedGenre\" yet"
+                    else -> "no favorites resolved yet — tap Refresh"
+                }
                 setPadding(0, 0, 0, 8)
             }.also { favContainer.addView(it) }
             return
         }
         favSample.forEach { f ->
-            Button(this).apply {
-                text = f.label()
-                isAllCaps = false
-                setOnClickListener { playFavorite(f) }
-            }.also { favContainer.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }
+            // Title and artist as two visually distinct lines, not one string
+            // with a dash — f.label() stays in use for log messages/dialog
+            // titles, just not for on-screen row rendering.
+            val titleView = TextView(this).apply {
+                text = f.title
+                textSize = 15f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#E3ECFF"))
+            }
+            val artistView = TextView(this).apply {
+                text = f.artist
+                textSize = 12f
+                setTextColor(Color.parseColor("#8FA6D6"))
+                setPadding(0, 2, 0, 0)
+            }
+
+            // Deliberately not styled like an action button (Refresh, Stop
+            // tracking...) — this is a list of songs, not a control.
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.parseColor("#1E2A47"))
+                setPadding(24, 16, 24, 16)
+                addView(titleView)
+                addView(artistView)
+            }
+            FavoriteGestures.attach(this, row, f, onPlay = { playFavorite(f) }, onChanged = { reloadFavorites() })
+
+            val params = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            params.bottomMargin = 6
+            favContainer.addView(row, params)
         }
+    }
+
+    /**
+     * Long-press on Refresh. Filters the pool used by Refresh/reloadFavorites
+     * — "All" clears the filter. The choice sticks (reflected in the button
+     * label) until changed again. Current selection is pre-checked.
+     */
+    private fun showGenrePicker() {
+        val labels = (listOf("All") + Favorites.GENRES).toTypedArray()
+        val current = selectedGenre?.let { Favorites.GENRES.indexOf(it) + 1 } ?: 0
+        var picked = current
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Show favorites in genre")
+            .setSingleChoiceItems(labels, current) { _, which -> picked = which }
+            .setPositiveButton("OK") { d, _ ->
+                selectedGenre = if (picked == 0) null else labels[picked]
+                genreBtn.text = "Refresh: ${selectedGenre ?: "All"}"
+                reloadFavorites()
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun playFavorite(f: Favorites.Fav) {
@@ -320,6 +376,20 @@ class MainActivity : Activity() {
         mixHeaderView.text = "Mix: ${f.title} by ${f.artist}"
         Probes.probeC(this, f.videoId)
         logView.postDelayed({ refreshStatus() }, 1500)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, 1, 0, "YTM Launch")
+        menu.add(0, 2, 1, "YTM Old")
+        menu.add(0, 3, 2, "Diagnostics")
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
+        1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
+        2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
+        3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
+        else -> super.onOptionsItemSelected(item)
     }
 
     // -------------------------------------------------------------- log
@@ -383,8 +453,16 @@ class MainActivity : Activity() {
         logScroll.post { logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
     }
 
+    // ProbeLog/SessionLogger callbacks are single global slots shared with
+    // DiagnosticsActivity's own copies of this UI — registering in
+    // onResume/clearing in onPause (not onCreate/onDestroy) ensures whichever
+    // screen is actually in front is the one getting live updates, instead of
+    // the two screens fighting over a stale registration.
     override fun onResume() {
         super.onResume()
+        ProbeLog.setListener { line -> runOnUiThread { appendLogLine(line) } }
+        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState(); refreshStatus() } }
+        loadLogFromFile()
         refreshTrackState()
         refreshStatus()
         statusHandler.post(statusPoll)
@@ -392,12 +470,8 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         statusHandler.removeCallbacks(statusPoll)
-        super.onPause()
-    }
-
-    override fun onDestroy() {
         ProbeLog.setListener(null)
         SessionLogger.onStateChange = null
-        super.onDestroy()
+        super.onPause()
     }
 }
