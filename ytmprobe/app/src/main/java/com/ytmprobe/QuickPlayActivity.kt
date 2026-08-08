@@ -1,13 +1,10 @@
 package com.ytmprobe
 
-import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
-import android.view.Menu
-import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
@@ -18,24 +15,20 @@ import android.widget.TextView
 /**
  * "YTM Launch" — the app's actual startup screen (see the manifest's
  * LAUNCHER intent-filter, now on this activity rather than MainActivity).
- * Optimised purely for song selection: one row per genre (a random resolved
- * favorite tagged with it — genres with nothing resolved/tagged are
- * skipped), tap to play, swipe left to remove/swipe right to re-tag genre
- * (via FavoriteGestures, shared with MainActivity's rows), and a Refresh
- * button. No status line, no tracking controls, no log — those live on the
- * full page ("YTM Old"/MainActivity) and in DiagnosticsActivity.
- *
- * The 3-dot menu is the platform Options Menu, not a custom Toolbar —
- * Theme.Material already renders an ActionBar, and an unclaimed menu item
- * goes to the overflow icon by default, so this needs no XML resource,
- * consistent with how the rest of the app avoids layout/menu resource files.
- * It's a plain page switcher (YTM Launch / YTM Old / Diagnostics) — it does
- * not change the app's startup default, which is fixed to this screen.
+ * Optimised purely for song selection: the shared AppHeader (status + mix
+ * header — same as YTM Old, via the shared component, not hand-copied), one
+ * row per genre (a random resolved favorite tagged with it — genres with
+ * nothing resolved/tagged are skipped), tap to play, swipe left to
+ * remove/swipe right to re-tag genre (via FavoriteGestures, shared with
+ * MainActivity's rows), and a Refresh button. No tracking controls, no log —
+ * those live on the full page ("YTM Old"/MainActivity) and in
+ * DiagnosticsActivity. The 3-dot nav menu comes from NavActivity, shared by
+ * all three screens.
  */
-class QuickPlayActivity : Activity() {
+class QuickPlayActivity : NavActivity() {
 
+    private lateinit var appHeader: AppHeader
     private lateinit var listContainer: LinearLayout
-    private lateinit var warningView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,8 +44,8 @@ class QuickPlayActivity : Activity() {
             setPadding(24, 24, 24, 24)
         }
 
-        warningView = TextView(this).apply { setPadding(0, 0, 0, 8) }
-        root.addView(warningView)
+        appHeader = AppHeader(this)
+        root.addView(appHeader.view)
 
         listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(listContainer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -77,15 +70,6 @@ class QuickPlayActivity : Activity() {
         val i = Intent(this, SessionLogger::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i)
         else startService(i)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // Without this, tapping a song silently does nothing and nothing on
-        // this minimal screen would explain why — the only feedback would
-        // otherwise land in a log this screen doesn't show.
-        warningView.text = if (!Probes.hasNotificationAccess(this))
-            "⚠ Notification access needed — see Diagnostics" else ""
     }
 
     private fun reload() {
@@ -134,20 +118,17 @@ class QuickPlayActivity : Activity() {
 
     private fun play(f: Favorites.Fav) {
         ProbeLog.w(this, "quick play: ${f.label()}  ${f.videoId}")
+        appHeader.setMixHeader(f.title, f.artist)
         Probes.probeC(this, f.videoId)
     }
 
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, 1, 0, "YTM Launch")
-        menu.add(0, 2, 1, "YTM Old")
-        menu.add(0, 3, 2, "Diagnostics")
-        return true
+    override fun onResume() {
+        super.onResume()
+        appHeader.start()
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
-        2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
-        3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
-        else -> super.onOptionsItemSelected(item)
+    override fun onPause() {
+        appHeader.stop()
+        super.onPause()
     }
 }

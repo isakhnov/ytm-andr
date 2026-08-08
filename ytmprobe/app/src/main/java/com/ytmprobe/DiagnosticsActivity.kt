@@ -1,6 +1,5 @@
 package com.ytmprobe
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,8 +11,6 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -25,17 +22,20 @@ import android.widget.TextView
 
 /**
  * Everything that already answered its question for good, manual videoId
- * handling for the cases the automatic pickers can't cover, plus the two
- * cross-cutting concerns shared by every screen: the tracking on/off toggle
- * and the log. Both used to live on MainActivity alone; they moved here so
- * they're not duplicated across MainActivity ("YTM Old") and
- * QuickPlayActivity ("YTM Launch").
+ * handling for the cases the automatic pickers can't cover, plus the shared
+ * AppHeader (status + mix header, same as the other two screens), and the
+ * two cross-cutting concerns shared by every screen: the tracking on/off
+ * toggle and the log. Both also live on MainActivity ("YTM Old") — not a
+ * "moved to Diagnostics" relationship, all three screens carry them via
+ * shared components (AppHeader, NavActivity's 3-dot menu) rather than
+ * hand-copied code, after QuickPlayActivity silently missed the header for a
+ * whole round of changes when it was still copy-paste-based.
  *
  * Probes B1 and D are confirmed dead ends (FINDINGS.md, E9) and A/E are
  * one-time verifications (no MEDIA_ID, no queue mediaId) — kept here only to
  * re-check after a YTM update, not for routine use.
  */
-class DiagnosticsActivity : Activity() {
+class DiagnosticsActivity : NavActivity() {
 
     companion object {
         /** Confirmed working in probe C; used when nothing is stored yet. */
@@ -47,6 +47,7 @@ class DiagnosticsActivity : Activity() {
     }
 
     private lateinit var videoIdField: EditText
+    private lateinit var appHeader: AppHeader
 
     private lateinit var trackBtn: Button
     private lateinit var trackState: TextView
@@ -91,6 +92,9 @@ class DiagnosticsActivity : Activity() {
             setPadding(0, 24, 0, 8)
             root.addView(this)
         }
+
+        appHeader = AppHeader(this)
+        root.addView(appHeader.view)
 
         header("Setup")
         btn("Grant Notification Access") {
@@ -408,20 +412,6 @@ class DiagnosticsActivity : Activity() {
         logScroll.post { logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
     }
 
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, 1, 0, "YTM Launch")
-        menu.add(0, 2, 1, "YTM Old")
-        menu.add(0, 3, 2, "Diagnostics")
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
-        2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
-        3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
-        else -> super.onOptionsItemSelected(item)
-    }
-
     // ProbeLog/SessionLogger callbacks are single global slots shared with
     // MainActivity's own copies of this UI — registering in onResume/clearing
     // in onPause (not onCreate/onDestroy) ensures whichever screen is
@@ -437,9 +427,11 @@ class DiagnosticsActivity : Activity() {
         SessionLogger.onStateChange = { runOnUiThread { refreshTrackState() } }
         loadLogFromFile()
         refreshTrackState()
+        appHeader.start()
     }
 
     override fun onPause() {
+        appHeader.stop()
         ProbeLog.setListener(null)
         SessionLogger.onStateChange = null
         super.onPause()

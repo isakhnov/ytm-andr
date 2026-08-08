@@ -1,14 +1,11 @@
 package com.ytmprobe
 
-import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -18,45 +15,29 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * "YTM Old" — the original day-to-day surface: a passive status readout, a
- * rehearsal of the Android Auto favorites screen (same 5-random-plus-refresh
- * shape as ResumeCarAppService.FavoritesScreen — tapping a row plays it
- * directly, no videoId to see or type), the tracking toggle, and a
- * collapsible log. DiagnosticsActivity has its own copies of the tracking
- * toggle and log too (they're cross-cutting, not specific to one screen) —
- * this is not a "moved to Diagnostics" relationship, both screens carry them.
- * See QuickPlayActivity ("YTM Launch") for the minimal song-selection-only
- * alternative, which is the app's actual startup screen.
+ * "YTM Old" — the original day-to-day surface: the shared AppHeader
+ * (status + mix header), a rehearsal of the Android Auto favorites screen
+ * (same 5-random-plus-refresh shape as ResumeCarAppService.FavoritesScreen —
+ * tapping a row plays it directly, no videoId to see or type), the tracking
+ * toggle, and a collapsible log. DiagnosticsActivity has its own copies of
+ * the tracking toggle and log too (they're cross-cutting, not specific to
+ * one screen) — this is not a "moved to Diagnostics" relationship, both
+ * screens carry them. See QuickPlayActivity ("YTM Launch") for the minimal
+ * song-selection-only alternative, which is the app's actual startup screen.
+ * The 3-dot nav menu comes from NavActivity, shared by all three screens.
  *
  * Everything that already answered its question for good (probes A/E/B1/D),
  * one-time setup (Grant Notification Access), and manual videoId handling
  * live in DiagnosticsActivity instead of cluttering this screen — see
  * FINDINGS.md for what each of those settled.
  */
-class MainActivity : Activity() {
+class MainActivity : NavActivity() {
 
     companion object {
         /** Live view is trimmed to this many lines; the file on disk is never trimmed. */
         const val MAX_LOG_LINES = 400
         /** Force a full rebuild (to actually drop old lines) at most this often. */
         const val REBUILD_INTERVAL = 100
-        /** How often the status strip re-checks YTM while the screen is visible. */
-        const val STATUS_POLL_MS = 3000L
-    }
-
-    private val statusHandler = android.os.Handler(android.os.Looper.getMainLooper())
-
-    /**
-     * The status strip is otherwise only refreshed on explicit triggers
-     * (open, resume, after tapping a favorite) — nothing pushes an update
-     * when the track changes for any other reason (YTM auto-advancing, a
-     * manual skip in YTM itself). This keeps it live while the app is open.
-     */
-    private val statusPoll = object : Runnable {
-        override fun run() {
-            refreshStatus()
-            statusHandler.postDelayed(this, STATUS_POLL_MS)
-        }
     }
 
     private lateinit var page: LinearLayout
@@ -70,8 +51,7 @@ class MainActivity : Activity() {
     private val logLines = ArrayDeque<String>()
     private var appendsSinceRebuild = 0
 
-    private lateinit var statusView: TextView
-    private lateinit var mixHeaderView: TextView
+    private lateinit var appHeader: AppHeader
     private lateinit var favContainer: LinearLayout
     private lateinit var genreBtn: Button
     private lateinit var trackBtn: Button
@@ -111,15 +91,9 @@ class MainActivity : Activity() {
             root.addView(this)
         }
 
-        statusView = TextView(this).apply { setPadding(0, 0, 0, 8) }
-        root.addView(statusView)
+        appHeader = AppHeader(this)
+        root.addView(appHeader.view)
 
-        mixHeaderView = TextView(this).apply {
-            text = "YTM original selection"
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 24, 0, 8)
-        }
-        root.addView(mixHeaderView)
         favContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(favContainer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         genreBtn = btn("Refresh: All") {
@@ -230,21 +204,6 @@ class MainActivity : Activity() {
         // Tracking starts with the app; the button exists to stop it.
         if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
         refreshTrackState()
-        refreshStatus()
-
-        // One-time static read of whatever YTM is already playing, if
-        // anything — not live, never re-read after this; playFavorite()
-        // overwrites it the moment an explicit selection is made.
-        run {
-            val c0 = Probes.ytmController(this)
-            val t0 = c0?.metadata?.description?.title?.toString()
-            val a0 = c0?.metadata?.description?.subtitle?.toString()
-            mixHeaderView.text = when {
-                t0.isNullOrBlank() -> "YTM original selection"
-                a0.isNullOrBlank() -> "Mix: $t0"
-                else -> "Mix: $t0 by $a0"
-            }
-        }
 
         // Fill any blank favorite IDs quietly in the background, then show
         // a sample — same shape the car will show once this app connects.
@@ -266,21 +225,6 @@ class MainActivity : Activity() {
                     "${Favorites.resolvedCount(this)} playable"
         else
             "○ tracking stopped   —   ${Favorites.count(this)} favorite(s)"
-    }
-
-    /** YTM session + notification access, at a glance — replaces the old Status button. */
-    private fun refreshStatus() {
-        val c = Probes.ytmController(this)
-
-        val sb = StringBuilder()
-        if (!Probes.hasNotificationAccess(this)) {
-            sb.append("⚠ Notification access needed — see Diagnostics\n")
-        }
-        sb.append(
-            if (c != null) "Playing: ${c.metadata?.description?.title ?: "?"}"
-            else "Not playing"
-        )
-        statusView.text = sb.toString().trim()
     }
 
     /**
@@ -369,27 +313,8 @@ class MainActivity : Activity() {
 
     private fun playFavorite(f: Favorites.Fav) {
         ProbeLog.w(this, "playing favorite: ${f.label()}  ${f.videoId}")
-        // Self-authored, not read from YTM: dumpsys confirmed queueTitle never
-        // carries the mix name ("Adieu Mix" showed in YTM's own UI while
-        // queueTitle stayed "Up next") — so there's nothing reliable to pull.
-        // We already know exactly what we selected; use that directly.
-        mixHeaderView.text = "Mix: ${f.title} by ${f.artist}"
+        appHeader.setMixHeader(f.title, f.artist)
         Probes.probeC(this, f.videoId)
-        logView.postDelayed({ refreshStatus() }, 1500)
-    }
-
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, 1, 0, "YTM Launch")
-        menu.add(0, 2, 1, "YTM Old")
-        menu.add(0, 3, 2, "Diagnostics")
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        1 -> { startActivity(Intent(this, QuickPlayActivity::class.java)); true }
-        2 -> { startActivity(Intent(this, MainActivity::class.java)); true }
-        3 -> { startActivity(Intent(this, DiagnosticsActivity::class.java)); true }
-        else -> super.onOptionsItemSelected(item)
     }
 
     // -------------------------------------------------------------- log
@@ -461,15 +386,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         ProbeLog.setListener { line -> runOnUiThread { appendLogLine(line) } }
-        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState(); refreshStatus() } }
+        SessionLogger.onStateChange = { runOnUiThread { refreshTrackState() } }
         loadLogFromFile()
         refreshTrackState()
-        refreshStatus()
-        statusHandler.post(statusPoll)
+        appHeader.start()
     }
 
     override fun onPause() {
-        statusHandler.removeCallbacks(statusPoll)
+        appHeader.stop()
         ProbeLog.setListener(null)
         SessionLogger.onStateChange = null
         super.onPause()
