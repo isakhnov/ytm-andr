@@ -175,6 +175,39 @@ object Probes {
         }, 10_000)
     }
 
+    /**
+     * Play a videoId whether or not YTM's process is currently alive.
+     *
+     * probeC alone silently no-ops when YTM has been killed (no session to
+     * command) — exactly the case a lock-screen tap after a long drive with
+     * Spotify needs to handle, since the whole point is recovering from YTM
+     * having been evicted. When there's no live session, fall back to the
+     * same deep-link launch FINDINGS.md's E3/E9 proved is the only mechanism
+     * that can cold-start YTM at all (every MediaSession-based cold-start
+     * path — dispatch play, a raw media-button broadcast, MediaBrowserCompat
+     * — failed; YTM validates those down to Android Auto/Wear OS callers).
+     * setPackage(YTM) pins the target app so Android resolves directly to
+     * YTM's own deep-link activity instead of showing App Links' chooser.
+     * A notification tap's PendingIntent is BAL-exempt (documented in
+     * FINDINGS.md's "Cold start" section), so starting this activity from
+     * here — even with our own process freshly cold-started to deliver the
+     * broadcast — is allowed.
+     */
+    fun playOrLaunch(ctx: Context, videoId: String) {
+        if (ytmController(ctx) != null) {
+            probeC(ctx, videoId)
+            return
+        }
+        ProbeLog.w(ctx, "  no live YTM session — cold-starting via deep link")
+        val uri = Uri.parse("https://music.youtube.com/watch?v=$videoId")
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage(YTM)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { ctx.startActivity(intent) }
+            .onFailure { ProbeLog.w(ctx, "  cold-start launch failed: $it") }
+    }
+
     // ------------------------------------------------------------------
     // PROBE C — will a LIVE session honour playFromUri?
     //

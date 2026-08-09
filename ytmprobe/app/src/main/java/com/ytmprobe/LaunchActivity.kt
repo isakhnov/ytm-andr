@@ -7,6 +7,8 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.util.TypedValue
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -108,7 +110,7 @@ class LaunchActivity : NavActivity() {
         ProbeLog.w(this, "launch play: ${f.label()}  ${f.videoId}")
         appHeader.setMixHeader(f.title, f.artist)
         Store.saveMixSeed(this, f.title, f.artist, f.videoId)
-        Probes.probeC(this, f.videoId)
+        Probes.playOrLaunch(this, f.videoId)
     }
 
     /**
@@ -223,6 +225,14 @@ private class GenreRowAdapter(
             layoutParams = RecyclerView.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 8 }
             addView(titleView)
             addView(subView)
+            isClickable = true
+            isHapticFeedbackEnabled = true
+            // Ripple drawn on top of the row's own background color — the
+            // themed selectableItemBackground rather than a hand-rolled
+            // state-list, so it matches the system's ripple color/speed.
+            val ripple = TypedValue()
+            ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+            foreground = ctx.getDrawable(ripple.resourceId)
         }
         return RowHolder(row, titleView, subView)
     }
@@ -231,7 +241,10 @@ private class GenreRowAdapter(
         val f = items[position]
         holder.titleView.text = f.title
         holder.subView.text = "${f.artist}  ·  ${f.genre}"
-        holder.row.setOnClickListener { onPlay(f) }
+        holder.row.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            onPlay(f)
+        }
     }
 
     override fun getItemCount(): Int = items.size

@@ -27,6 +27,6 @@ class PlayFavoriteReceiver : BroadcastReceiver() {
 
         ProbeLog.w(context, "notification play: $title — $artist  $videoId")
         Store.saveMixSeed(context, title, artist, videoId)
-        Probes.probeC(context, videoId)
+        Probes.playOrLaunch(context, videoId)
     }
 }

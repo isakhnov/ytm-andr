@@ -113,7 +113,7 @@ class QuickPlayActivity : NavActivity() {
         ProbeLog.w(this, "quick play: ${f.label()}  ${f.videoId}")
         appHeader.setMixHeader(f.title, f.artist)
         Store.saveMixSeed(this, f.title, f.artist, f.videoId)
-        Probes.probeC(this, f.videoId)
+        Probes.playOrLaunch(this, f.videoId)
     }
 
     override fun onResume() {

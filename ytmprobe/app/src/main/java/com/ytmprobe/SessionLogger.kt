@@ -232,6 +232,12 @@ class SessionLogger : Service() {
             .setContentText("watching for likes")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
+            // A foreground service must have a notification, but nothing
+            // requires it on the lock screen — VISIBILITY_SECRET keeps it out
+            // of that surface entirely (unlike PRIVATE, which still shows a
+            // redacted placeholder), leaving only FavoritesNotifier's picker
+            // there, the one row of notifications actually meant to be seen.
+            .setVisibility(Notification.VISIBILITY_SECRET)
             .build()
     }
 }
