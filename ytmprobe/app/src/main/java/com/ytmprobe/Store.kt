@@ -15,6 +15,8 @@ object Store {
     private const val PREFS = "ytmprobe"
     private const val K_LAST = "last"
     private const val K_CACHE = "cache"
+    private const val K_MIX_SEED = "mixSeed"
+    private const val K_AUTO_CONTINUE_ELIGIBLE = "autoContinueEligible"
 
     private fun prefs(ctx: Context) =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -78,6 +80,49 @@ object Store {
         prefs(ctx).edit().remove(K_CACHE).apply()
     }
 
+    // ------------------------------------------------------------- mix seed
+
+    /**
+     * The favorite that was explicitly tapped to start the *current* mix —
+     * not the currently-playing track (YTM's algorithm moves on from that on
+     * its own). Auto-continue replays this seed, the same action a manual
+     * tap would do, so YTM's algorithm picks up a fresh but related mix
+     * rather than trying to restore the exact song/position.
+     */
+    data class MixSeed(val title: String, val artist: String, val videoId: String)
+
+    fun saveMixSeed(ctx: Context, title: String, artist: String, videoId: String) {
+        val json = JSONObject().apply {
+            put("title", title); put("artist", artist); put("videoId", videoId)
+        }
+        prefs(ctx).edit().putString(K_MIX_SEED, json.toString()).apply()
+    }
+
+    fun loadMixSeed(ctx: Context): MixSeed? {
+        val s = prefs(ctx).getString(K_MIX_SEED, null) ?: return null
+        return runCatching {
+            val o = JSONObject(s)
+            MixSeed(o.optString("title"), o.optString("artist"), o.optString("videoId"))
+        }.getOrNull()
+    }
+
+    // ------------------------------------------------------- auto-continue
+
+    /**
+     * Set by SessionLogger when the YTM session disappears while it was
+     * genuinely playing (not paused/silent) within the last ~60s — i.e. the
+     * car/AA session probably just shut down mid-song, not that the user
+     * deliberately stopped it. Consumed (cleared) the next time a session
+     * appears and auto-continue actually fires, so it only ever fires once
+     * per eligible disappearance.
+     */
+    fun setAutoContinueEligible(ctx: Context, eligible: Boolean) {
+        prefs(ctx).edit().putBoolean(K_AUTO_CONTINUE_ELIGIBLE, eligible).apply()
+    }
+
+    fun isAutoContinueEligible(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(K_AUTO_CONTINUE_ELIGIBLE, false)
+
     fun dump(ctx: Context): String {
         val last = loadLast(ctx)
         val sb = StringBuilder()
@@ -91,7 +136,10 @@ object Store {
             sb.append("  position : ${last.positionMs}ms\n")
             sb.append("  liked    : ${last.liked}\n")
         }
-        sb.append("cache: ${cacheSize(ctx)} entries")
+        sb.append("cache: ${cacheSize(ctx)} entries\n")
+        val seed = loadMixSeed(ctx)
+        sb.append("mix seed: ${seed?.let { "${it.title} — ${it.artist}  ${it.videoId}" } ?: "(none)"}\n")
+        sb.append("auto-continue eligible: ${isAutoContinueEligible(ctx)}")
         return sb.toString()
     }
 }

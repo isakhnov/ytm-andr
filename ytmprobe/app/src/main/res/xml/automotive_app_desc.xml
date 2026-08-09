@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The legacy "Android Auto for apps" declaration mechanism, referenced by
+     the com.google.android.gms.car.application meta-data in AndroidManifest.xml.
+     Confirmed required by decompiling gearhead's own validator string
+     ("Package DENIED; Uses for %s not defined [%s]") and matching it against
+     Home Assistant's identical, working automotive_app_desc.xml — this gate
+     runs independently of, and in addition to, the modern androidx.car.app
+     Car App Library manifest declarations. -->
+<automotiveApp>
+    <uses name="template" />
+</automotiveApp>

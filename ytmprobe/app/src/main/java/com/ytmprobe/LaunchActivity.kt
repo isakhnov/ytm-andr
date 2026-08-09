@@ -19,28 +19,25 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
 /**
- * "Launch v2" — experimental rebuild of QuickPlayActivity ("YTM Launch")
- * using RecyclerView + ItemTouchHelper for swipe gestures, instead of the
- * manual GestureDetector approach in FavoriteGestures.
+ * "YTM Launch" — the app's default entry point (see the manifest's LAUNCHER
+ * intent-filter). Rebuilt from the original QuickPlayActivity using
+ * RecyclerView + ItemTouchHelper for swipe gestures instead of the manual
+ * GestureDetector approach in FavoriteGestures, once real-world use on a
+ * drive confirmed it worked correctly and QuickPlayActivity was retired.
  *
- * That approach was broken by construction, not just mistuned:
- * GestureDetector.onFling() only recognises a fast, decisive flick — not the
- * slow controlled drag people actually use for swipe-to-act (drag partway,
- * see the action reveal, then commit or let go). And the row sits inside a
- * vertically-scrolling ScrollView, which intercepts anything with a
- * vertical component before a fling can even be measured. ItemTouchHelper is
- * the standard Android answer for exactly this conflict — the same
- * mechanism Gmail-style swipe-to-archive uses — because RecyclerView's touch
- * handling is built to disambiguate an item's horizontal drag from the
- * list's vertical scroll, and it gives live drag-follow plus a reveal
- * background for free via onChildDraw.
- *
- * Kept as a separate screen alongside QuickPlayActivity rather than
- * replacing it — MainActivity and QuickPlayActivity are unchanged; this is
- * additive, reachable from the shared 3-dot menu (NavActivity) like every
- * other screen.
+ * The GestureDetector approach it replaced was broken by construction, not
+ * just mistuned: GestureDetector.onFling() only recognises a fast, decisive
+ * flick — not the slow controlled drag people actually use for swipe-to-act
+ * (drag partway, see the action reveal, then commit or let go). And the row
+ * sat inside a vertically-scrolling ScrollView, which intercepts anything
+ * with a vertical component before a fling can even be measured.
+ * ItemTouchHelper is the standard Android answer for exactly this conflict —
+ * the same mechanism Gmail-style swipe-to-archive uses — because
+ * RecyclerView's touch handling is built to disambiguate an item's
+ * horizontal drag from the list's vertical scroll, and it gives live
+ * drag-follow plus a reveal background for free via onChildDraw.
  */
-class LaunchV2Activity : NavActivity() {
+class LaunchActivity : NavActivity() {
 
     private lateinit var appHeader: AppHeader
     private lateinit var recyclerView: RecyclerView
@@ -49,7 +46,7 @@ class LaunchV2Activity : NavActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "Launch v2"
+        title = "YTM Launch"
 
         if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
 
@@ -70,8 +67,8 @@ class LaunchV2Activity : NavActivity() {
         adapter = GenreRowAdapter(onPlay = { f -> play(f) })
 
         recyclerView = RecyclerView(this).apply {
-            layoutManager = LinearLayoutManager(this@LaunchV2Activity)
-            adapter = this@LaunchV2Activity.adapter
+            layoutManager = LinearLayoutManager(this@LaunchActivity)
+            adapter = this@LaunchActivity.adapter
         }
         root.addView(
             recyclerView,
@@ -108,8 +105,9 @@ class LaunchV2Activity : NavActivity() {
     }
 
     private fun play(f: Favorites.Fav) {
-        ProbeLog.w(this, "launch v2 play: ${f.label()}  ${f.videoId}")
+        ProbeLog.w(this, "launch play: ${f.label()}  ${f.videoId}")
         appHeader.setMixHeader(f.title, f.artist)
+        Store.saveMixSeed(this, f.title, f.artist, f.videoId)
         Probes.probeC(this, f.videoId)
     }
 
@@ -142,9 +140,9 @@ class LaunchV2Activity : NavActivity() {
             if (position == RecyclerView.NO_POSITION) return
             val f = adapter.itemAt(position)
             if (direction == ItemTouchHelper.LEFT) {
-                FavoriteGestures.removeFavorite(this@LaunchV2Activity, f) { reload() }
+                FavoriteGestures.removeFavorite(this@LaunchActivity, f) { reload() }
             } else {
-                FavoriteGestures.showGenreTagPicker(this@LaunchV2Activity, f) { reload() }
+                FavoriteGestures.showGenreTagPicker(this@LaunchActivity, f) { reload() }
             }
             adapter.notifyItemChanged(position)
         }

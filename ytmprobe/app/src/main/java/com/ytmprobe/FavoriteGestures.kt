@@ -7,12 +7,15 @@ import android.view.View
 import kotlin.math.abs
 
 /**
- * Swipe + long-press behavior shared by every favorites row across both home
- * screens (MainActivity/"YTM Old" and QuickPlayActivity/"YTM Launch"): swipe
+ * Swipe + long-press behavior shared by favorites rows on MainActivity
+ * ("YTM Old") and the retired QuickPlayActivity ("YTM Launch (v1)"): swipe
  * left removes the favorite, swipe right (or long-press) opens the genre-tag
- * picker. Previously duplicated per-screen; kept here once so the two rows
- * can't silently drift apart the way YTM Launch's did (it never got the
- * gesture wiring MainActivity's rows had).
+ * picker. LaunchActivity ("YTM Launch") drives the same two actions via
+ * ItemTouchHelper instead (see its SwipeCallback), calling
+ * removeFavorite/showGenreTagPicker directly rather than through attach().
+ * Previously duplicated per-screen; kept here once so rows can't silently
+ * drift apart the way YTM Launch's did (it never got the gesture wiring
+ * MainActivity's rows had).
  *
  * A GestureDetector runs alongside the row's normal click listener rather
  * than replacing it — but a fling still ends with ACTION_UP inside a
@@ -51,7 +54,7 @@ object FavoriteGestures {
         row.setOnTouchListener { _, event -> gestures.onTouchEvent(event); false }
     }
 
-    /** Also called directly by LaunchV2Activity's ItemTouchHelper swipe callback. */
+    /** Also called directly by LaunchActivity's ItemTouchHelper swipe callback. */
     fun removeFavorite(ctx: Activity, f: Favorites.Fav, onChanged: () -> Unit) {
         Favorites.remove(ctx, f.key)
         ProbeLog.w(ctx, "removed favorite (swipe): ${f.label()}")

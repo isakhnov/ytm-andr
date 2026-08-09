@@ -25,11 +25,24 @@
         android:name="android.software.car.templates_host"
         android:required="true" />
 
+    <!-- enableOnBackInvokedCallback="false": Android 16 (targetSdk 36, bumped
+         for ResumeCarAppService's intentMatchingFlags below) reserves the
+         screen edges more aggressively for the predictive back gesture,
+         which broke left/right swipe on favorite rows (FavoriteGestures,
+         LaunchActivity's ItemTouchHelper) — both rows span full width, so
+         a swipe starting near an edge was being intercepted by the system
+         gesture before our own touch handling ever saw it. No per-region
+         opt-out exists; this app has no back-stack navigation predictive
+         back's animation would meaningfully improve anyway, so opting out
+         app-wide is the documented, supported fix. -->
     <application
         android:allowBackup="false"
-        android:label="YTM Probe"
+        android:label="YTM Launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material">
+        android:theme="@android:style/Theme.Material"
+        android:enableOnBackInvokedCallback="false">
 
         <!-- "YTM Old" — kept startable via adb/explicit Intent for testing
              even without a LAUNCHER filter (exported has no bearing on
@@ -44,9 +57,20 @@
             android:exported="false"
             android:label="Diagnostics" />
 
-        <!-- "YTM Launch" — the app's actual startup screen. -->
+        <!-- "YTM Launch (v1)" — retired in favor of LaunchActivity below;
+             kept startable via the 3-dot menu/adb for comparison, same as
+             "YTM Old". -->
         <activity
             android:name=".QuickPlayActivity"
+            android:exported="true"
+            android:label="YTM Launch (v1)" />
+
+        <!-- "YTM Launch" — the app's actual startup screen. RecyclerView/
+             ItemTouchHelper rebuild of QuickPlayActivity's swipe gestures,
+             confirmed working on-device and promoted to the default entry
+             point. -->
+        <activity
+            android:name=".LaunchActivity"
             android:exported="true"
             android:label="YTM Launch">
             <intent-filter>
@@ -54,14 +78,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- "Launch v2" — experimental RecyclerView/ItemTouchHelper rebuild
-             of YTM Launch's swipe gestures; reached only via the 3-dot menu,
-             not a startup screen. -->
-        <activity
-            android:name=".LaunchV2Activity"
-            android:exported="false"
-            android:label="Launch v2" />
 
         <!-- Required to obtain MediaSessionManager.getActiveSessions().
              The service itself does nothing; its existence is what grants
@@ -75,12 +91,29 @@
             </intent-filter>
         </service>
 
+        <!-- Fired only by our own notification taps (PendingIntent carries
+             our identity regardless of exported) — not a general-purpose
+             externally-triggerable receiver. -->
+        <receiver
+            android:name=".PlayFavoriteReceiver"
+            android:exported="false" />
+
         <!-- Android Auto surface: 5 random favorites + refresh.
              Category IOT because Android Auto has no "utility" category and
-             this is not navigation, messaging, or calling. Sideload only. -->
+             this is not navigation, messaging, or calling. Sideload only.
+
+             intentMatchingFlags="allowNullAction": Android 15+ enforces exact
+             intent-filter matching by default, and the intent Android Auto's
+             own app sends to bind/discover a CarAppService doesn't satisfy
+             that exact match (confirmed via Home Assistant's Android Auto
+             GitHub issue #5534 — identical PackageManager "Intent does not
+             match component's intent filter" / "Access blocked" log lines).
+             Without this, the service is invisible to AA's app list, not
+             just unbindable — it never even reaches Customize Launcher. -->
         <service
             android:name=".ResumeCarAppService"
-            android:exported="true">
+            android:exported="true"
+            android:intentMatchingFlags="allowNullAction">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.IOT" />
@@ -90,6 +123,15 @@
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
             android:value="1" />
+
+        <!-- Legacy "Android Auto for apps" declaration — gearhead's own
+             CAR.VALIDATOR checks for this independently of everything above
+             ("Package DENIED; Uses for TEMPLATE not defined [com.ytmprobe]",
+             confirmed live via logcat while opening AA's Customize Launcher).
+             See res/xml/automotive_app_desc.xml. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
 
         <!-- Foreground service so session appear/disappear events keep being
              logged overnight and during the drive. -->

@@ -148,6 +148,10 @@ class DiagnosticsActivity : NavActivity() {
         btn("Clear resolution cache") { Probes.clearCache(this) }
         btn("Tag genres automatically") { Probes.tagGenres(this) }
 
+        header("Lock-screen favorites notification")
+        btn("Post now (${FavoritesNotifier.ROWS} random favorites)") { FavoritesNotifier.show(this) }
+        btn("Clear") { FavoritesNotifier.cancelAll(this) }
+
         header("Manual override")
         btn("Pick from last candidates") {
             val list = Probes.lastCandidates

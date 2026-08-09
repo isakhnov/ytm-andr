@@ -59,7 +59,7 @@ echo "built: $APK"
 if adb devices | grep -qw device; then
   echo "installing..."
   adb install -r "$APK"
-  adb shell am start -n com.ytmprobe/.MainActivity
+  adb shell am start -n com.ytmprobe/.LaunchActivity
   echo "launched."
 else
   echo "no device attached — install later with:"

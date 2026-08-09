@@ -31,7 +31,7 @@ Manual equivalents:
 ```bash
 ./gradlew assembleDebug --no-daemon      # build only
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.ytmprobe/.MainActivity
+adb shell am start -n com.ytmprobe/.LaunchActivity
 ```
 
 Retrieve the on-device log (see "Logging" below):
@@ -43,12 +43,12 @@ There are no automated tests in this project — verification is done by running
 on a real device (an emulator cannot complete the Android Auto connection tests) and
 reading the resulting log.
 
-First run on a device: tap "Grant Notification Access" in the app and enable YTM Probe
+First run on a device: tap "Grant Notification Access" in the app and enable YTM Launcher
 in the system list. `MediaSessionManager.getActiveSessions()` throws `SecurityException`
 without it, and every probe fails silently into that branch.
 
 Samsung devices: battery optimization kills the background tracking service overnight.
-Set Settings → Apps → YTM Probe → Battery → **Unrestricted** or the session logger
+Set Settings → Apps → YTM Launcher → Battery → **Unrestricted** or the session logger
 won't survive to record anything.
 
 ## Architecture

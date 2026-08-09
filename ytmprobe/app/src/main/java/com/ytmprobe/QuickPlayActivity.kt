@@ -13,17 +13,13 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * "YTM Launch" — the app's actual startup screen (see the manifest's
- * LAUNCHER intent-filter, now on this activity rather than MainActivity).
- * Optimised purely for song selection: the shared AppHeader (status + mix
- * header — same as YTM Old, via the shared component, not hand-copied), one
- * row per genre (a random resolved favorite tagged with it — genres with
- * nothing resolved/tagged are skipped), tap to play, swipe left to
- * remove/swipe right to re-tag genre (via FavoriteGestures, shared with
- * MainActivity's rows), and a Refresh button. No tracking controls, no log —
- * those live on the full page ("YTM Old"/MainActivity) and in
- * DiagnosticsActivity. The 3-dot nav menu comes from NavActivity, shared by
- * all three screens.
+ * "YTM Launch (v1)" — retired in favor of LaunchActivity ("YTM Launch"),
+ * which rebuilt the same screen's swipe gestures on ItemTouchHelper after
+ * this version's manual GestureDetector approach regressed under Android
+ * 16's predictive-back gesture and, more fundamentally, never handled a
+ * slow controlled drag correctly to begin with (see LaunchActivity's doc
+ * comment). Kept startable via the 3-dot menu and adb for comparison/
+ * reference, same as "YTM Old"/MainActivity — not a startup screen anymore.
  */
 class QuickPlayActivity : NavActivity() {
 
@@ -32,11 +28,8 @@ class QuickPlayActivity : NavActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "YTM Launch"
+        title = "YTM Launch (v1)"
 
-        // This is the app's default entry point now — tracking (passive
-        // favorites capture) must actually be running even if the user never
-        // visits YTM Old, or new favorites silently never get captured.
         if (!SessionLogger.running && Probes.hasNotificationAccess(this)) startTracking()
 
         val root = LinearLayout(this).apply {
@@ -119,6 +112,7 @@ class QuickPlayActivity : NavActivity() {
     private fun play(f: Favorites.Fav) {
         ProbeLog.w(this, "quick play: ${f.label()}  ${f.videoId}")
         appHeader.setMixHeader(f.title, f.artist)
+        Store.saveMixSeed(this, f.title, f.artist, f.videoId)
         Probes.probeC(this, f.videoId)
     }
 

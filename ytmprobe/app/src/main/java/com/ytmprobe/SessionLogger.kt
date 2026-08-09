@@ -9,18 +9,27 @@ import android.content.Intent
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 
 /**
- * Single tracking service. Two responsibilities:
+ * Single tracking service. Three responsibilities:
  *
  *   1. Session lifecycle — logs YTM sessions appearing/disappearing, which
  *      answers the car-connect timing question in FINDINGS.
  *   2. Track observation — polls every 10s and applies the favorites capture
  *      rules from SPEC-favorites.md.
+ *   3. Auto-continue — if YTM was genuinely playing (not paused/silent)
+ *      within ~60s of its session disappearing (car/AA shutting down
+ *      mid-song, not a deliberate stop), replay the mix seed — the favorite
+ *      that was tapped to start the current mix, not the exact last song —
+ *      the next time a YTM session appears. One-shot: consumed the moment
+ *      it fires, doesn't refire on every subsequent session appearance.
  *
  * There is no separate "poller". This service IS tracking.
  */
@@ -28,6 +37,7 @@ class SessionLogger : Service() {
 
     companion object {
         const val POLL_MS = 10_000L
+        const val AUTO_CONTINUE_WINDOW_MS = 60_000L
 
         /** Reflects real service state, not the last button press. */
         @Volatile
@@ -48,6 +58,9 @@ class SessionLogger : Service() {
 
     /** Key of the track currently observed, for once-per-play counting. */
     private var currentKey: String? = null
+
+    /** Wall-clock time of the last poll that saw YTM actually STATE_PLAYING. */
+    private var lastPlayingAt: Long = 0L
 
     private val listener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
@@ -75,6 +88,8 @@ class SessionLogger : Service() {
             return
         }
 
+        FavoritesNotifier.show(this)
+
         val t = HandlerThread("ytm-poll").also { it.start() }
         pollThread = t
         pollHandler = Handler(t.looper).also { it.post(pollTask) }
@@ -89,6 +104,7 @@ class SessionLogger : Service() {
         runCatching { msm.removeOnActiveSessionsChangedListener(listener) }
         runCatching { pollHandler?.removeCallbacks(pollTask) }
         runCatching { pollThread?.quitSafely() }
+        FavoritesNotifier.cancelAll(this)
         ProbeLog.w(this, "TRACKING stopped")
         super.onDestroy()
     }
@@ -111,12 +127,38 @@ class SessionLogger : Service() {
                 val c = controllers.first { it.packageName == Probes.YTM }
                 ProbeLog.w(this, ">>> YTM SESSION APPEARED  state=${c.playbackState?.state} " +
                         "title=${c.metadata?.description?.title}")
+                maybeAutoContinue(c)
             } else {
                 ProbeLog.w(this, "<<< YTM session gone")
                 currentKey = null
+                val playedRecently = lastPlayingAt > 0 &&
+                        System.currentTimeMillis() - lastPlayingAt <= AUTO_CONTINUE_WINDOW_MS
+                Store.setAutoContinueEligible(this, playedRecently)
+                if (playedRecently) {
+                    ProbeLog.w(this, "  (was playing recently — auto-continue armed for next session)")
+                }
             }
             lastYtm = ytm
         }
+    }
+
+    /**
+     * Fires at most once per eligible disappearance — cleared immediately so
+     * a session that appears, drops, and reappears in quick succession
+     * doesn't replay the seed on every reappearance.
+     */
+    private fun maybeAutoContinue(c: MediaController) {
+        if (!Store.isAutoContinueEligible(this)) return
+        Store.setAutoContinueEligible(this, false)
+        val seed = Store.loadMixSeed(this)
+        if (seed == null || seed.videoId.isBlank()) {
+            ProbeLog.w(this, "  auto-continue: armed but no mix seed stored — skipping")
+            return
+        }
+        ProbeLog.w(this, "  >>> auto-continue: replaying seed ${seed.title} — ${seed.artist}")
+        val uri = Uri.parse("https://music.youtube.com/watch?v=${seed.videoId}")
+        runCatching { c.transportControls.playFromUri(uri, Bundle()) }
+            .onFailure { ProbeLog.w(this, "  auto-continue failed: $it") }
     }
 
     // ---------------------------------------------------------------- poll
@@ -132,6 +174,14 @@ class SessionLogger : Service() {
     private fun pollOnce() {
         // Any early return here means "no observation" — never "unliked".
         val c = Probes.ytmController(this) ?: return
+
+        // Tracked independently of everything below — auto-continue only
+        // cares whether YTM was actively playing, not whether this poll also
+        // had a resolvable title/rating.
+        if (c.playbackState?.state == PlaybackState.STATE_PLAYING) {
+            lastPlayingAt = System.currentTimeMillis()
+        }
+
         val md = c.metadata ?: return
 
         val title = md.getString(MediaMetadata.METADATA_KEY_TITLE) ?: return
@@ -173,12 +223,12 @@ class SessionLogger : Service() {
         val id = "ytmprobe"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(id, "YTM Probe", NotificationManager.IMPORTANCE_LOW))
+                NotificationChannel(id, "YTM Launcher", NotificationManager.IMPORTANCE_LOW))
         }
         val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             Notification.Builder(this, id)
         else @Suppress("DEPRECATION") Notification.Builder(this)
-        return b.setContentTitle("YTM Probe — tracking")
+        return b.setContentTitle("YTM Launcher — tracking")
             .setContentText("watching for likes")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)

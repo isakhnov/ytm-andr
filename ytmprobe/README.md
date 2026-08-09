@@ -1,4 +1,4 @@
-# YTM Probe
+# YTM Launcher
 
 Six probes, passive favorites tracking, and an Android Auto favorites surface.
 The project answers the questions that decide the architecture of the
@@ -38,7 +38,7 @@ useful target since it's the phone that goes in the car.
 
 ## Run
 
-**First:** tap *Grant Notification Access* and enable YTM Probe in the list.
+**First:** tap *Grant Notification Access* and enable YTM Launcher in the list.
 Without it `getActiveSessions()` throws and every probe fails.
 
 Then *Status* to confirm the plumbing works before probing anything.
@@ -81,7 +81,7 @@ connected. If a session exists before you touch anything, your app only needs
 to command it.
 
 **Samsung caveat:** One UI kills background services aggressively. Before the
-overnight test, go to Settings → Apps → YTM Probe → Battery → **Unrestricted**,
+overnight test, go to Settings → Apps → YTM Launcher → Battery → **Unrestricted**,
 or the logger won't survive to record the morning.
 
 ## Reading the results

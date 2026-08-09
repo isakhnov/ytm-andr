@@ -10,7 +10,7 @@ assembly plus two questions only answerable on a real drive.
 Environment: 2025 Mercedes GLE63 (MBUX NTG7), Samsung SM-S948U1 (Android Auto
 beta), development on macOS against an Android emulator and the phone.
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
 
 ---
 
@@ -55,6 +55,7 @@ random favourite), and let YTM's recommendation engine choose what follows.
 | Restore position (`seekTo`) | untested | — |
 | Cold-start a dead YTM from app code | **impossible** | probes B1, D |
 | Cold-start via Samsung routine | untested | — |
+| Show `ResumeCarAppService` in Android Auto (sideloaded) | **impossible** | decompiled gearhead `CAR.VALIDATOR`, see Dead ends |
 
 ---
 
@@ -91,6 +92,95 @@ appears in AA must be the app decoding audio.
 The App Remote SDK lets an app hand a URI to the Spotify client, which plays and
 continues on its own. YTM has no equivalent. If switching services were
 acceptable, this would be a documented weekend project.
+
+### Sideloaded Car App Library apps cannot appear in Android Auto's launcher
+`ResumeCarAppService` (category `IOT`) is manifest-correct, icon-correct, and
+Play Protect-clean, yet never appears in Android Auto's Customize Launcher —
+not even in "Hidden Apps" — regardless of "Unknown sources" being enabled.
+Confirmed by decompiling `com.google.android.projection.gearhead`'s own
+validator (`CAR.VALIDATOR`, class `iwt`), not by inference:
+
+- Every androidx.car.app category (`IOT`, `POI`, `WEATHER`, ...) maps
+  internally to a single generic bucket, `qnh.TEMPLATE`.
+- The "Unknown sources" developer toggle only overrides the allowlist
+  `{MEDIA, NAVIGATION, NOTIFICATION, OEM, NATIVE_APP, SERVICE, SMS}` — the
+  legacy, pre-Car-App-Library integration paths. `TEMPLATE` (and
+  `MESSAGING`) are structurally excluded from that allowlist. No manifest
+  change can add a category to this list; it's compiled into gearhead.
+- The only way past this gate is the *other* branch above it: a live
+  `Finsky.IsValid` check confirming the package was actually installed by
+  the Play Store. A locally-signed, adb-installed APK can never satisfy that.
+
+Two manifest fixes were real and are worth keeping (they'd matter the moment
+this app is ever Play-distributed, and the second one likely still applies
+to real users hitting it today):
+
+- `android:intentMatchingFlags="allowNullAction"` on the service — Android
+  15+'s strict intent-filter matching otherwise blocks the *bind*, once a
+  package clears the validator. Root-caused via Home Assistant Android's
+  GitHub issue #5534 (identical `PackageManager: Intent does not match
+  component's intent filter` log line).
+- `res/xml/automotive_app_desc.xml` (`<uses name="template"/>`) referenced
+  via `com.google.android.gms.car.application` meta-data — the legacy
+  "Android Auto for apps" declaration gearhead's validator still checks
+  independently of the modern manifest declarations, confirmed by matching
+  its exact log format string (`"Uses for %s not defined [%s]"`) against
+  Home Assistant's working `automotive_app_desc.xml`.
+
+**Net result: this app can never show up in Android Auto as a local/debug
+build.** The only legitimate path is real Play Store distribution (even a
+closed internal testing track), which changes the installer-attribution
+check entirely — a distribution decision, not a code fix.
+
+**Independent corroboration.** A completely separate reverse-engineering
+effort — [matsumo0922/OneNavi](https://github.com/matsumo0922/OneNavi),
+`docs/logs/10_android_auto_projection_gating_investigation.md` — decompiled
+the same validator class on a newer gearhead build (v16.8, Pixel 10,
+targetSdk 37) for a related question (getting a real `Activity` projected
+the way Google Maps does, not just a `CarAppService`) and landed on the
+identical allowlist, independently:
+
+```
+m = {MEDIA, NAVIGATION, NOTIFICATION, OEM, NATIVE_APP, SERVICE, SMS}
+excluded: PROJECTION, TEMPLATE, MESSAGING
+```
+
+Confirms this isn't a stale build or a fluke of this specific device —
+`TEMPLATE` exclusion is current and consistent across gearhead versions.
+
+**Phase 2 — one real bypass exists, deliberately not pursued now.** Their
+investigation traces an *earlier* check in the same validator, one we'd
+already seen without registering its significance:
+
+```java
+if (I()) { return z4; }   // unconditional ALLOW — runs before the
+                           // category-allowlist check above ever executes
+```
+
+`I()` is true when the connected head unit's reported `CarInfo` matches a
+short hardcoded list of dev rigs — `"Google"/"Desktop Head Unit"`,
+`"Google"/"Emulator"`, `"Google"/"tangorpro [AAR]"`,
+`"Panasonic"/"Seahawk [AAR]"`. When it matches, gearhead trusts *any*
+category, `TEMPLATE` included, and skips signature/Play/allowlist checks
+entirely. That data comes from the car during the AA handshake — nothing
+in our manifest or app code influences it.
+
+The way this gets exploited in practice (per OneNavi's escape-hatch survey,
+and matching what car-audio hobbyist tooling actually does): a **MITM proxy
+between phone and car** that rewrites the handshake's make/model fields to
+claim "Desktop Head Unit" instead of the real vehicle. `aa-proxy-rs` (a real
+open-source wireless-AA-dongle firmware project) implements exactly this.
+Everything else they catalogued — hooking `GoogleSignatureVerifier` via
+Frida/LSPosed, spoofing `getInstallerPackageName()` to claim Play
+installation, rewriting Phenotype server-flags — needs root and is riskier
+for no more benefit.
+
+**Deliberately not pursued now.** This stops being an app change and
+becomes standing up separate hardware/firmware between the phone and the
+car's head unit — a real infrastructure decision (cost, reliability,
+maintenance of third-party dongle firmware) distinct in kind from everything
+else in this project. Revisit only as an explicit, separately-scoped
+decision — not a natural next step off this investigation.
 
 ---
 

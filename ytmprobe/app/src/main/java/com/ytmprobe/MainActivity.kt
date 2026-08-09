@@ -22,9 +22,9 @@ import android.widget.TextView
  * toggle, and a collapsible log. DiagnosticsActivity has its own copies of
  * the tracking toggle and log too (they're cross-cutting, not specific to
  * one screen) — this is not a "moved to Diagnostics" relationship, both
- * screens carry them. See QuickPlayActivity ("YTM Launch") for the minimal
+ * screens carry them. See LaunchActivity ("YTM Launch") for the minimal
  * song-selection-only alternative, which is the app's actual startup screen.
- * The 3-dot nav menu comes from NavActivity, shared by all three screens.
+ * The 3-dot nav menu comes from NavActivity, shared by every screen.
  *
  * Everything that already answered its question for good (probes A/E/B1/D),
  * one-time setup (Grant Notification Access), and manual videoId handling
@@ -314,6 +314,7 @@ class MainActivity : NavActivity() {
     private fun playFavorite(f: Favorites.Fav) {
         ProbeLog.w(this, "playing favorite: ${f.label()}  ${f.videoId}")
         appHeader.setMixHeader(f.title, f.artist)
+        Store.saveMixSeed(this, f.title, f.artist, f.videoId)
         Probes.probeC(this, f.videoId)
     }
 
