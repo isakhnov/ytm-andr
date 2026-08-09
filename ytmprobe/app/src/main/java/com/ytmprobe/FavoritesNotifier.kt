@@ -52,15 +52,19 @@ object FavoritesNotifier {
         }
 
         sample.forEachIndexed { i, f ->
-            val playIntent = Intent(ctx, PlayFavoriteReceiver::class.java).apply {
-                action = PlayFavoriteReceiver.ACTION_PLAY
-                putExtra(PlayFavoriteReceiver.EXTRA_VIDEO_ID, f.videoId)
-                putExtra(PlayFavoriteReceiver.EXTRA_TITLE, f.title)
-                putExtra(PlayFavoriteReceiver.EXTRA_ARTIST, f.artist)
+            // getActivity, not getBroadcast: since targetSdk 31, Android
+            // silently blocks a broadcast-receiver-mediated activity launch
+            // ("notification trampoline") — see PlayFavoriteActivity's doc
+            // comment for how that broke cold-starting YTM from this tap.
+            val playIntent = Intent(ctx, PlayFavoriteActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(PlayFavoriteActivity.EXTRA_VIDEO_ID, f.videoId)
+                putExtra(PlayFavoriteActivity.EXTRA_TITLE, f.title)
+                putExtra(PlayFavoriteActivity.EXTRA_ARTIST, f.artist)
             }
             // Distinct request code per row so each PendingIntent is unique —
             // otherwise FLAG_UPDATE_CURRENT would collapse them onto one extras set.
-            val pi = PendingIntent.getBroadcast(
+            val pi = PendingIntent.getActivity(
                 ctx, ROW_ID_BASE + i, playIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )

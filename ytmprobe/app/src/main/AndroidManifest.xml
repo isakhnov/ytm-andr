@@ -92,11 +92,19 @@
         </service>
 
         <!-- Fired only by our own notification taps (PendingIntent carries
-             our identity regardless of exported) — not a general-purpose
-             externally-triggerable receiver. -->
-        <receiver
-            android:name=".PlayFavoriteReceiver"
-            android:exported="false" />
+             our identity regardless of exported). A real Activity rather
+             than a BroadcastReceiver — see PlayFavoriteActivity's doc
+             comment for why a broadcast-mediated activity launch gets
+             silently blocked as a "notification trampoline" on targetSdk
+             31+. NoDisplay: nothing is ever drawn; noHistory/
+             excludeFromRecents: it must not linger anywhere once finish()
+             runs. -->
+        <activity
+            android:name=".PlayFavoriteActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
 
         <!-- Android Auto surface: 5 random favorites + refresh.
              Category IOT because Android Auto has no "utility" category and
