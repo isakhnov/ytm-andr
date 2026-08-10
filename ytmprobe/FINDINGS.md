@@ -10,7 +10,7 @@ assembly plus two questions only answerable on a real drive.
 Environment: 2025 Mercedes GLE63 (MBUX NTG7), Samsung SM-S948U1 (Android Auto
 beta), development on macOS against an Android emulator and the phone.
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 ---
 
@@ -55,7 +55,10 @@ random favourite), and let YTM's recommendation engine choose what follows.
 | Restore position (`seekTo`) | untested | — |
 | Cold-start a dead YTM from app code | **impossible** | probes B1, D |
 | Cold-start via Samsung routine | untested | — |
-| Show `ResumeCarAppService` in Android Auto (sideloaded) | **impossible** | decompiled gearhead `CAR.VALIDATOR`, see Dead ends |
+| Show `ResumeCarAppService` (Car App Library) in Android Auto (sideloaded) | **impossible** | decompiled gearhead `CAR.VALIDATOR`, see Dead ends |
+| Show a `MediaBrowserServiceCompat` app in Android Auto (sideloaded) | **works** ★ | `AA-Test`, live on real hardware — see "Legacy media apps reopen this" |
+| Command YTM from a tap on the Android Auto screen | **works**, via `playFromUri` on a live session | `AA-Test` — see below |
+| Cold-start YTM (no live session) from an Android Auto media tap | untested | only tested with a live session present so far |
 
 ---
 
@@ -181,6 +184,102 @@ car's head unit — a real infrastructure decision (cost, reliability,
 maintenance of third-party dongle firmware) distinct in kind from everything
 else in this project. Revisit only as an explicit, separately-scoped
 decision — not a natural next step off this investigation.
+
+---
+
+### Legacy `MediaBrowserServiceCompat` apps reopen this — confirmed live, real hardware
+
+The `TEMPLATE` block above is specific to `androidx.car.app` (Car App
+Library) — every category in that library, including `ResumeCarAppService`'s
+`IOT`, maps to that one blocked bucket. It says nothing about the *other*
+allowed buckets. `{MEDIA, NAVIGATION, NOTIFICATION, OEM, NATIVE_APP, SERVICE,
+SMS}` was sitting there the whole time, decompile-confirmed as allowed for
+sideloaded/"Unknown sources" apps — this project just never tried building
+against it, because every prior AA attempt was Car App Library or the
+now-abandoned multichannel-audio `MediaBrowserService` idea (`E1`, rejected
+for a stereo-only audio channel — irrelevant to a pure launcher that hands
+off rather than plays).
+
+Tested via a throwaway sibling project, **`AA-Test`** (`com.aatest`, see its
+own `README.md`): a minimal legacy `MediaBrowserServiceCompat` (`androidx.
+media`, not `androidx.car.app`), one fake "track," `automotive_app_desc.xml`
+declaring `<uses name="media"/>` (the classic pre-Car-App-Library
+declaration, same one Google's UAMP sample uses) instead of `ResumeCarApp
+Service`'s `template`.
+
+**Result: it appears in Android Auto's Customize Launcher, sideloaded, with
+just the standard Developer Mode "Unknown sources" toggle.** No Phase 2
+bypass, no spoofed `CarInfo`, no MITM proxy. Confirmed on real hardware, not
+DHU. This is the first time anything in this project has gotten a sideloaded
+surface onto the actual Android Auto screen.
+
+**Getting the tap to actually work took two more rounds, and both fixes are
+worth keeping in mind for any real implementation:**
+
+1. **First attempt failed: "Could not load your selection."** The one media
+   item had no icon set on its `MediaDescriptionCompat`. Adding
+   `setIconUri()` pointing at a bundled drawable via an
+   `android.resource://` URI was necessary but not sufficient.
+2. **Second attempt, same error**, despite the icon fix and despite
+   `onPlayFromMediaId` demonstrably firing (logged) and the deep-link
+   `startActivity()` call demonstrably running (logged, and confirmed
+   independently — `ytmprobe`'s own session logger picked up a fresh YTM
+   session appearing right after the tap). Added `mediaSession.
+   setPlaybackState()` calls (`STATE_BUFFERING` then `STATE_STOPPED`) around
+   the launch, since gearhead's own log called the session "maybe is not
+   activated" and the code had never called `setPlaybackState()` at all —
+   still the same error.
+3. **Third attempt succeeded**, with a different fix: instead of always
+   cold-starting YTM via `startActivity()` on a deep link, port `Probes.
+   playOrLaunch`'s actual logic — check for YTM's live `MediaController`
+   first (via `MediaSessionManager`, gated on Notification Access, same
+   `NotifListener` pattern) and command it directly with `playFromUri()`
+   when one exists, falling back to the deep link only if not. YTM already
+   had a live session in every test so far, so this path is the one that's
+   actually been exercised. It worked immediately, logged: `"live YTM
+   session found — commanding playFromUri directly, no activity launch."`
+
+**What this actually shows:** the failure was never about the icon or the
+playback state (those may be real requirements too, but neither fixed it
+alone) — it's that **launching an `Activity` from inside a
+`MediaSessionCompat.Callback` while gearhead's browse UI is live doesn't
+work**, or at least doesn't satisfy whatever gearhead is waiting on to
+consider the tap successful. Commanding an *existing* session directly —
+no window, no activity, just a transport-control Binder call — does. This
+rhymes with, but is a distinct mechanism from, the notification-trampoline
+BAL block this same project already hit and fixed on the phone side (see
+`PlayFavoriteActivity`'s doc comment) — that was a broadcast-receiver
+restriction; this looks like something gearhead itself enforces on its
+browse/playback UI, not a general Android BAL rule.
+
+**Still genuinely untested: the cold-start case.** Every successful (and
+failed) live test so far happened with YTM already running. Whether tapping
+a favorite in Android Auto with YTM *dead* successfully cold-starts it via
+the deep-link fallback — or hits the same "Could not load your selection"
+wall the direct-activity-launch path did — is unknown. Given the pattern
+above, there's real reason to expect it might fail the same way; if so, the
+phone-side fix (an invisible trampoline `Activity`, `PlayFavoriteActivity`)
+won't directly transfer, since gearhead's browse UI is a different caller
+context than a notification tap. Worth testing explicitly before relying on
+this for the actual "resume after a long drive" scenario, which is
+precisely the case where YTM is most likely to be dead.
+
+Force-stopping YTM and reconnecting to test this doesn't isolate anything —
+the Samsung routine that opens YTM on AA connect (see "Cold start" section
+below) relaunches it before a tap is even possible, so the app is never
+actually dead when `AA-Test`'s service gets a chance to check. This needs a
+YTM death that happens *mid-drive*, after the routine has already fired —
+i.e. a real test on a longer drive, not a quick reconnect-and-tap.
+
+**Practical implication:** this reopens what this document called flatly
+"impossible" two sections up. The path to a real Android Auto surface for
+`ytmprobe` isn't Car App Library and isn't the DHU-spoofing Phase 2 bypass —
+it's a legacy `MediaBrowserServiceCompat`, the same architecture `ytmprobe`
+already depends on `androidx.media` for (probe B1). Not yet folded back into
+`ytmprobe` itself; `AA-Test` is a standalone, throwaway sibling project for
+exactly this reason — real caller validation in `onGetRoot()`, a real
+favorites list instead of one hardcoded track, and the cold-start question
+above all need resolving first.
 
 ---
 

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Android 11+ package visibility: needed to launch YTM via deep link. -->
+    <queries>
+        <package android:name="com.google.android.apps.youtube.music" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:label="AA Test"
+        android:icon="@drawable/ic_play"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material">
+
+        <!-- The one thing under test: a legacy MediaBrowserServiceCompat
+             (androidx.media), not androidx.car.app's CarAppService — see
+             README.md and ../../ytmprobe/FINDINGS.md's "Dead ends ruled
+             out" section for why the Car App Library path is a decompile-
+             confirmed dead end (every category maps to gearhead's blocked
+             TEMPLATE bucket) while this one, category MEDIA, is not. -->
+        <service
+            android:name=".AutoMediaService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- automotive_app_desc.xml declares "media", not "template" — the
+             classic pre-Car-App-Library Android Auto media-app declaration
+             (same one Google's own UAMP sample app uses). ytmprobe's
+             automotive_app_desc.xml, by contrast, declares "template" for
+             its CarAppService — confirmed via decompiling gearhead's own
+             validator log format string ("Uses for %s not defined [%s]").
+             Untested here whether gearhead checks this the same way for a
+             MEDIA-category app as it does for TEMPLATE; if the app fails to
+             appear even with Unknown sources enabled, check logcat for that
+             exact log line while opening Customize Launcher. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
+        <!-- Required to obtain MediaSessionManager.getActiveSessions(),
+             which AutoMediaService uses to check for a live YTM session
+             before deciding whether to command it directly (playFromUri)
+             or cold-start via deep link. Same pattern as ytmprobe's
+             identically-named, identically-empty NotifListener — the
+             declaration alone grants eligibility; nothing here reads a
+             notification. Requires the user to grant Notification Access
+             once: Settings → Notifications → Special app access →
+             Notification access → AA Test. -->
+        <service
+            android:name=".NotifListener"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+    </application>
+</manifest>
