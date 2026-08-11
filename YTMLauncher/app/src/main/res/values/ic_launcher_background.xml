@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the app's existing dark-theme row/accent palette (MainActivity, QuickPlayActivity). -->
+    <color name="ic_launcher_background">#12203F</color>
+</resources>

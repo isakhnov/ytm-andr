@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Android 11+ package visibility: without this we cannot see YTM at all. -->
+    <queries>
+        <package android:name="com.google.android.apps.youtube.music" />
+    </queries>
+
+    <!-- enableOnBackInvokedCallback="false": Android 16's predictive-back
+         gesture reserves screen edges more aggressively, which broke
+         left/right swipe on favorite rows (see LaunchActivity's
+         ItemTouchHelper). No per-region opt-out exists, and this app has no
+         back-stack navigation predictive back's animation would meaningfully
+         improve, so opting out app-wide is the documented, supported fix.
+         Kept even at targetSdk 34 (where it's not yet mandatory) since it's
+         still correct and harmless. -->
+    <application
+        android:allowBackup="false"
+        android:label="YTM Launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material"
+        android:enableOnBackInvokedCallback="false">
+
+        <!-- The app's default entry point. -->
+        <activity
+            android:name=".LaunchActivity"
+            android:exported="true"
+            android:label="YTM Launch">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Settings" />
+
+        <!-- Required to obtain MediaSessionManager.getActiveSessions().
+             The service itself does nothing; its existence is what grants
+             the app eligibility for Notification Access. -->
+        <service
+            android:name=".NotifListener"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Fired only by our own notification taps (PendingIntent carries
+             our identity regardless of exported). A real Activity rather
+             than a BroadcastReceiver — see PlayFavoriteActivity's doc
+             comment for why a broadcast-mediated activity launch gets
+             silently blocked as a "notification trampoline" on targetSdk
+             31+. NoDisplay: nothing is ever drawn; noHistory/
+             excludeFromRecents: it must not linger anywhere once finish()
+             runs. -->
+        <activity
+            android:name=".PlayFavoriteActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+
+        <!-- Android Auto surface: legacy MediaBrowserServiceCompat (category
+             MEDIA), not androidx.car.app (category TEMPLATE, which
+             ytmprobe/FINDINGS.md decompile-confirmed is blocked for
+             sideloaded apps). Proven live via the AA-Test sibling project —
+             see automotive_app_desc.xml and AutoMediaService's doc comment. -->
+        <service
+            android:name=".AutoMediaService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- automotive_app_desc.xml declares "media", not "template" — the
+             classic pre-Car-App-Library Android Auto media-app declaration
+             (same one Google's own UAMP sample app uses), proven to clear
+             gearhead's CAR.VALIDATOR live via the AA-Test sibling project. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
+        <!-- Starts tracking on boot so favorites capture survives a phone
+             reboot without the app being opened manually first — SessionLogger
+             is only otherwise started from LaunchActivity.onCreate. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Foreground service so session appear/disappear events keep being
+             logged overnight and during the drive. dataSync, not
+             mediaPlayback: this service polls and syncs session/favorites
+             state, it never plays audio itself — mediaPlayback would grant
+             OEM lock-screen exemptions meant for real playback controls,
+             which caused SessionLogger's own notification to leak onto the
+             lock screen despite VISIBILITY_SECRET (see SessionLogger.kt). -->
+        <service
+            android:name=".SessionLogger"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+    </application>
+</manifest>

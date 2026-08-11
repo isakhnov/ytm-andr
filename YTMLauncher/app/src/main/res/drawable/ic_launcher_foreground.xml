@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Four-bar waveform/equalizer mark, round-capped strokes, centered within the
+     adaptive-icon safe zone (inner 66dp circle of the 108x108 canvas) so it
+     survives circle/squircle/rounded-square masking on any launcher or Android
+     Auto's own icon rendering. Matches the icon-options.html preview. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#E3ECFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:pathData="M34,46 L34,62" />
+    <path
+        android:strokeColor="#E3ECFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:pathData="M48,34 L48,74" />
+    <path
+        android:strokeColor="#AFCBFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:pathData="M62,24 L62,84" />
+    <path
+        android:strokeColor="#E3ECFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:pathData="M76,38 L76,70" />
+</vector>
