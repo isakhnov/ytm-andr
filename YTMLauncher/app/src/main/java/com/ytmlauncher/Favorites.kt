@@ -208,8 +208,9 @@ object Favorites {
         if (list.isEmpty()) return "no favorites yet"
         val sb = StringBuilder("${list.size} favorite(s), ${resolvedCount(ctx)} resolved:\n")
         list.forEachIndexed { i, f ->
-            sb.append("  [%2d] %-11s %2dx  %s\n".format(
-                i, f.videoId.ifBlank { "(unresolved)" }, f.playCount, f.label()))
+            sb.append("  [%2d] %-11s %2dx  %-13s %s\n".format(
+                i, f.videoId.ifBlank { "(unresolved)" }, f.playCount,
+                f.genre.ifBlank { "(none)" }, f.label()))
         }
         return sb.toString().trimEnd()
     }
