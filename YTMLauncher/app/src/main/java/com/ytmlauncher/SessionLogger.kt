@@ -99,7 +99,15 @@ class SessionLogger : Service() {
             return
         }
 
-        FavoritesNotifier.show(this)
+        // Opt-in only (Store.isFavoritesNotificationsEnabled — off by
+        // default): this used to fire unconditionally on every tracking
+        // start, which is exactly the "notifications nobody asked for"
+        // complaint the setting exists to fix. Settings' own "Post now"
+        // button is unaffected by this check — pressing it already is an
+        // explicit request.
+        if (Store.isFavoritesNotificationsEnabled(this)) {
+            FavoritesNotifier.show(this)
+        }
 
         val t = HandlerThread("ytm-poll").also { it.start() }
         pollThread = t

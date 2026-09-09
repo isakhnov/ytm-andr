@@ -9,13 +9,20 @@ import android.content.Intent
 import android.os.Build
 
 /**
- * Lock-screen song picker: up to ROWS individually-tappable notifications
- * (one per random resolved favorite), bundled under one summary via
- * setGroup — the standard Android mechanism for "several independently
- * actionable items," the same one Gmail/messaging apps use for a stack of
- * tappable items. Not MediaStyle (built for one now-playing track's
- * controls, not a picker) and not a single InboxStyle notification (its
- * extra lines are just text, never individually tappable).
+ * Lock-screen song picker: up to one individually-tappable notification per
+ * genre (a random resolved favorite from that genre, same "one per genre"
+ * selection AutoMediaService/LaunchActivity already use, rather than a flat
+ * random sample — every row is a different genre's pick, not just N
+ * arbitrary favorites), bundled under one summary via setGroup — the
+ * standard Android mechanism for "several independently actionable items,"
+ * the same one Gmail/messaging apps use for a stack of tappable items. Not
+ * MediaStyle (built for one now-playing track's controls, not a picker) and
+ * not a single InboxStyle notification (its extra lines are just text,
+ * never individually tappable).
+ *
+ * Entirely opt-in as of the fix that added Store.isFavoritesNotificationsEnabled
+ * — see its doc for why. show()/cancelAll() themselves don't check that flag
+ * (they're the mechanism, not the policy); every *automatic* call site does.
  *
  * Each row's tap fires PlayFavoriteActivity directly via an Activity
  * PendingIntent — see that class's doc comment for why it's a real
@@ -23,11 +30,15 @@ import android.os.Build
  */
 object FavoritesNotifier {
 
-    const val ROWS = 8
     private const val CHANNEL_ID = "ytmlauncher_favorites"
     private const val GROUP_KEY = "ytmlauncher_favorites_group"
     private const val SUMMARY_ID = 199
-    private const val ROW_ID_BASE = 200 // 200..207
+
+    // Sized off Favorites.GENRES.size, not a fixed constant — one row per
+    // genre means the id space needs to track that list, the same
+    // data-driven principle Favorites.nextGenre already established: adding
+    // a genre needs no change here.
+    private const val ROW_ID_BASE = 200
 
     private fun channel(ctx: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -41,10 +52,10 @@ object FavoritesNotifier {
         channel(ctx)
         val nm = ctx.getSystemService(NotificationManager::class.java)
 
-        val sample = Favorites.all(ctx)
-            .filter { it.videoId.isNotBlank() }
-            .shuffled()
-            .take(ROWS)
+        val all = Favorites.all(ctx).filter { it.videoId.isNotBlank() }
+        val sample = Favorites.GENRES.mapNotNull { genre ->
+            all.filter { it.genre == genre }.shuffled().firstOrNull()
+        }
 
         if (sample.isEmpty()) {
             ProbeLog.w(ctx, "favorites notification: no resolved favorites to show")
@@ -71,7 +82,7 @@ object FavoritesNotifier {
 
             val n = Notification.Builder(ctx, CHANNEL_ID)
                 .setContentTitle(f.title)
-                .setContentText(f.artist)
+                .setContentText("${f.artist}  ·  ${f.genre}")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(pi)
                 .setGroup(GROUP_KEY)
@@ -96,7 +107,7 @@ object FavoritesNotifier {
 
     fun cancelAll(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        for (i in 0 until ROWS) nm.cancel(ROW_ID_BASE + i)
+        for (i in Favorites.GENRES.indices) nm.cancel(ROW_ID_BASE + i)
         nm.cancel(SUMMARY_ID)
     }
 }

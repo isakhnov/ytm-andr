@@ -180,6 +180,25 @@ object Favorites {
         save(ctx, list)
     }
 
+    /**
+     * Advances `current` to the next entry in `genres`, wrapping around —
+     * the single step behind AutoMediaService's now-playing "Reclassify"
+     * action (see its doc for why a cycling button, not a picker screen, is
+     * what Android Auto's framework actually allows here). `genres`
+     * defaults to GENRES so every real call site (just AutoMediaService)
+     * needs zero code, zero awareness of the list's contents, to stay
+     * correct the moment GENRES gains, loses, or reorders an entry — the
+     * parameter exists only so FavoritesTest can prove that genericity
+     * directly, against lists GENRES will never actually contain, rather
+     * than only ever re-testing today's fixed 9 entries. Unrecognized or
+     * blank input (indexOf returns -1) lands on genres[0] with no
+     * special-casing needed.
+     */
+    fun nextGenre(current: String, genres: List<String> = GENRES): String {
+        val idx = genres.indexOf(current)
+        return genres[(idx + 1).mod(genres.size)]
+    }
+
     // -------------------------------------------------------------- picker
 
     /**

@@ -48,6 +48,9 @@ class SettingsActivity : NavActivity() {
     private lateinit var trackBtn: Button
     private lateinit var trackState: TextView
 
+    private lateinit var refreshModelBtn: Button
+    private lateinit var notificationsEnabledBtn: Button
+
     private lateinit var page: LinearLayout
     private lateinit var controlsScroll: ScrollView
     private lateinit var logSection: LinearLayout
@@ -62,6 +65,12 @@ class SettingsActivity : NavActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "Settings"
+        // Explicit back arrow to return to normal mode (LaunchActivity) —
+        // real user feedback that Settings had no visible way back besides
+        // the system Back gesture/button. android.R.id.home is handled in
+        // NavActivity.onOptionsItemSelected, shared with LaunchActivity's
+        // Settings action.
+        actionBar?.setDisplayHomeAsUpEnabled(true)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -107,6 +116,25 @@ class SettingsActivity : NavActivity() {
         }
         root.addView(trackBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+        header("Android Auto")
+        // Same toggle idiom as trackBtn above: the button's own label is
+        // the current state, tapping it cycles to the next one. Two
+        // designs for AutoMediaService's Refresh tile, meant to be tried
+        // against each other on real hardware without a rebuild — see
+        // Store.RefreshModel's doc for what each one actually does.
+        refreshModelBtn = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                val next = when (Store.getRefreshModel(this@SettingsActivity)) {
+                    Store.RefreshModel.LEGACY -> Store.RefreshModel.IN_PLACE
+                    Store.RefreshModel.IN_PLACE -> Store.RefreshModel.LEGACY
+                }
+                Store.setRefreshModel(this@SettingsActivity, next)
+                refreshRefreshModelState()
+            }
+        }
+        root.addView(refreshModelBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
         header("Favorites")
         btn("Resolve favorites now") {
             Probes.resolveFavorites(this)
@@ -121,7 +149,23 @@ class SettingsActivity : NavActivity() {
         btn("Clear resolution cache") { Probes.clearCache(this) }
 
         header("Lock-screen favorites notification")
-        btn("Post now (${FavoritesNotifier.ROWS} random favorites)") { FavoritesNotifier.show(this) }
+        // Same toggle idiom as trackBtn/refreshModelBtn above. Off by
+        // default (Store.isFavoritesNotificationsEnabled) — gates only the
+        // *automatic* posting (SessionLogger on tracking start,
+        // PlayFavoriteActivity's re-post after a row is tapped); toggling
+        // this immediately shows/clears too, so the on-screen state and the
+        // actual notifications never disagree.
+        notificationsEnabledBtn = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                val enabled = !Store.isFavoritesNotificationsEnabled(this@SettingsActivity)
+                Store.setFavoritesNotificationsEnabled(this@SettingsActivity, enabled)
+                if (enabled) FavoritesNotifier.show(this@SettingsActivity) else FavoritesNotifier.cancelAll(this@SettingsActivity)
+                refreshNotificationsEnabledState()
+            }
+        }
+        root.addView(notificationsEnabledBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        btn("Post now (one per genre)") { FavoritesNotifier.show(this) }
         btn("Clear") { FavoritesNotifier.cancelAll(this) }
 
         header("Backup")
@@ -269,6 +313,20 @@ class SettingsActivity : NavActivity() {
             "○ tracking stopped   —   ${Favorites.count(this)} favorite(s)"
     }
 
+    private fun refreshRefreshModelState() {
+        refreshModelBtn.text = when (Store.getRefreshModel(this)) {
+            Store.RefreshModel.LEGACY -> "Refresh style: Legacy  (tap to switch)"
+            Store.RefreshModel.IN_PLACE -> "Refresh style: InPlace  (tap to switch)"
+        }
+    }
+
+    private fun refreshNotificationsEnabledState() {
+        notificationsEnabledBtn.text = if (Store.isFavoritesNotificationsEnabled(this))
+            "Notifications: On  (tap to disable)"
+        else
+            "Notifications: Off  (tap to enable)"
+    }
+
     // -------------------------------------------------------------- log
 
     private fun applyLogVisibility() {
@@ -320,6 +378,8 @@ class SettingsActivity : NavActivity() {
         SessionLogger.onStateChange = { runOnUiThread { refreshTrackState() } }
         loadLogFromFile()
         refreshTrackState()
+        refreshRefreshModelState()
+        refreshNotificationsEnabledState()
         appHeader.start()
     }
 
