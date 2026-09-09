@@ -102,4 +102,44 @@ class FavoritesTest {
         Favorites.setVideoId(ctx, key, "second")
         assertEquals("first", Favorites.all(ctx).first { it.key == key }.videoId)
     }
+
+    // -------------------------------------------------------- nextGenre
+    // AutoMediaService's Android Auto "Reclassify" cycling button — no
+    // Context/device needed, so these run as plain JVM logic tests despite
+    // living in this Robolectric-annotated class.
+
+    @Test
+    fun `nextGenre visits every real genre exactly once and wraps back to the start`() {
+        val visited = mutableListOf<String>()
+        var current = Favorites.GENRES[0]
+        repeat(Favorites.GENRES.size) {
+            visited.add(current)
+            current = Favorites.nextGenre(current)
+        }
+        assertEquals(Favorites.GENRES, visited)          // full loop, in order, no repeats/skips
+        assertEquals(Favorites.GENRES[0], current)        // one more step lands back at the start
+    }
+
+    @Test
+    fun `nextGenre treats an unrecognized or blank genre as starting before the first entry`() {
+        assertEquals(Favorites.GENRES[0], Favorites.nextGenre(""))
+        assertEquals(Favorites.GENRES[0], Favorites.nextGenre("Not A Real Genre"))
+    }
+
+    @Test
+    fun `nextGenre is driven entirely by whatever list is passed in`() {
+        // A synthetic list containing a genre Favorites.GENRES will never actually
+        // have — proof this needs zero code change the day a real genre is
+        // added, not just a re-run against today's fixed 9 entries.
+        val hypothetical = listOf("Rock", "Lo-Fi", "K-Pop")
+        assertEquals("Lo-Fi", Favorites.nextGenre("Rock", hypothetical))
+        assertEquals("K-Pop", Favorites.nextGenre("Lo-Fi", hypothetical))
+        assertEquals("Rock", Favorites.nextGenre("K-Pop", hypothetical))   // wraps
+    }
+
+    @Test
+    fun `nextGenre handles a single-entry list without dividing by a bad index`() {
+        assertEquals("Solo", Favorites.nextGenre("Solo", listOf("Solo")))
+        assertEquals("Solo", Favorites.nextGenre("Anything", listOf("Solo")))
+    }
 }

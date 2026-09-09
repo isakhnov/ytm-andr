@@ -44,7 +44,14 @@ class PlayFavoriteActivity : Activity() {
 
             ProbeLog.w(this, "notification play: $title — $artist  $videoId")
             Probes.playFavorite(this, title, artist, videoId)
-            FavoritesNotifier.show(this)
+            // Only re-posts if the picker is actually enabled (Store.
+            // isFavoritesNotificationsEnabled) — this tap could only have
+            // happened from one of its own rows, so the feature is already
+            // on, but checking here rather than assuming keeps this in
+            // sync if that ever stops being true.
+            if (Store.isFavoritesNotificationsEnabled(this)) {
+                FavoritesNotifier.show(this)
+            }
         }
         finish()
     }

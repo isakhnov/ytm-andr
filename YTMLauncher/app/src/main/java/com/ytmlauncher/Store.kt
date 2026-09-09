@@ -123,6 +123,87 @@ object Store {
     fun isAutoContinueEligible(ctx: Context): Boolean =
         prefs(ctx).getBoolean(K_AUTO_CONTINUE_ELIGIBLE, false)
 
+    // ------------------------------------------------- Auto refresh model
+
+    /**
+     * Two mutually-exclusive designs for AutoMediaService's Refresh
+     * affordance, selectable from Settings so both can be tried against
+     * each other on real hardware without a rebuild. A third design,
+     * EXTRA_BUTTON (a custom PlaybackStateCompat action on the now-playing
+     * template calling notifyChildrenChanged(ROOT_ID) with no navigation),
+     * was built and real-hardware tested, then removed outright rather than
+     * kept as a non-recommended option: it's not a bug away from working,
+     * it's structurally dead — its button only ever exists on the
+     * now-playing template, which shows track metadata, not the browse
+     * grid, so there is no on-screen content for it to ever repaint. If a
+     * true in-place repaint (no new stack frame, no forced template
+     * transition) is wanted again later, it needs a different mechanism
+     * than "a button on some other screen," not a revival of this one.
+     *
+     *  LEGACY — real-hardware-verified-working. Refresh is a FLAG_PLAYABLE
+     *  tile; tapping it forces gearhead's now-playing template (unavoidable
+     *  for any playable tap) showing "Refreshed" metadata, and calls
+     *  notifyChildrenChanged(ROOT_ID) immediately so root is fresh by the
+     *  time the user backs out. One forced screen transition per refresh.
+     *
+     *  IN_PLACE — the default. Refresh is a FLAG_BROWSABLE tile (a design
+     *  tried and abandoned once before LEGACY existed — see
+     *  AutoMediaService's onLoadChildren doc for why a second attempt was
+     *  warranted), minted with a fresh id each load so gearhead can't treat
+     *  repeat taps as an already-answered subscription. Tapping it pushes a
+     *  new child browse screen — never the now-playing template — built by
+     *  the exact same code path as root, so it looks identical (same
+     *  tiles, same now-playing ring) except freshly reshuffled; reads as
+     *  "refreshed in place" even though it's technically a new browse-stack
+     *  frame. Real-hardware confirmed working, and preferred over LEGACY's
+     *  jarring detour through the now-playing template. Known, accepted
+     *  limitation: gearhead draws its own back-arrow chrome on every pushed
+     *  browse screen with no API to suppress it — the same category of hard
+     *  platform boundary as the missing haptics/press-highlight documented
+     *  in CLAUDE.md, not something more code here can fix.
+     */
+    enum class RefreshModel { LEGACY, IN_PLACE }
+
+    private const val K_REFRESH_MODEL = "refreshModel"
+    private const val REFRESH_MODEL_LEGACY = "legacy"
+    private const val REFRESH_MODEL_IN_PLACE = "in_place"
+
+    fun getRefreshModel(ctx: Context): RefreshModel =
+        when (prefs(ctx).getString(K_REFRESH_MODEL, null)) {
+            REFRESH_MODEL_LEGACY -> RefreshModel.LEGACY
+            else -> RefreshModel.IN_PLACE
+        }
+
+    fun setRefreshModel(ctx: Context, model: RefreshModel) {
+        val value = when (model) {
+            RefreshModel.LEGACY -> REFRESH_MODEL_LEGACY
+            RefreshModel.IN_PLACE -> REFRESH_MODEL_IN_PLACE
+        }
+        prefs(ctx).edit().putString(K_REFRESH_MODEL, value).apply()
+    }
+
+    // -------------------------------------------- favorites notifications
+
+    /**
+     * Off by default. FavoritesNotifier's lock-screen picker used to post
+     * itself automatically every time tracking started
+     * (SessionLogger.onCreate) with no way to turn it off — real user
+     * feedback that this read as unwanted/unexpected notifications. Gates
+     * only the automatic call sites (SessionLogger, PlayFavoriteActivity's
+     * re-post-after-play); Settings' own explicit "Post now" button always
+     * works regardless of this setting, since pressing it already is the
+     * explicit enable this setting exists to require for anything
+     * unprompted.
+     */
+    private const val K_FAVORITES_NOTIFICATIONS_ENABLED = "favoritesNotificationsEnabled"
+
+    fun isFavoritesNotificationsEnabled(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(K_FAVORITES_NOTIFICATIONS_ENABLED, false)
+
+    fun setFavoritesNotificationsEnabled(ctx: Context, enabled: Boolean) {
+        prefs(ctx).edit().putBoolean(K_FAVORITES_NOTIFICATIONS_ENABLED, enabled).apply()
+    }
+
     fun dump(ctx: Context): String {
         val last = loadLast(ctx)
         val sb = StringBuilder()

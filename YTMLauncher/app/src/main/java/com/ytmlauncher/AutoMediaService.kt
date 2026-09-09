@@ -32,10 +32,32 @@ import java.util.concurrent.Executors
  * androidx.car.app-based ResumeCarAppService (category TEMPLATE, confirmed
  * blocked — see ytmprobe/FINDINGS.md).
  *
- * Browse tree deliberately mirrors LaunchActivity.reload() exactly (one
- * random resolved favorite per genre, reshuffled per load, plus a pinned
- * Resume row) rather than inventing a separate driving-specific scheme —
- * kept simple by explicit choice.
+ * Browse tree deliberately mirrors LaunchActivity.reload() (one random
+ * resolved favorite per genre, reshuffled per load) rather than inventing a
+ * separate driving-specific scheme — kept simple by explicit choice. There
+ * is no separate "Resume" tile: whichever genre the mix seed's track
+ * belongs to has *that* track forced into its own genre's slot (instead of
+ * a random pick) and moved first, with a gold ring baked into its art —
+ * same title/subtitle/mediaId shape as every other tile, just relocated and
+ * bordered, since a distinct "Resume" tile with its own text was
+ * real-hardware-confirmed confusing when it landed as a second full-size
+ * tile rather than reading as "this is where you left off."
+ *
+ * Refresh has two selectable designs (Store.RefreshModel, chosen from
+ * Settings, IN_PLACE by default) rather than one fixed one — see
+ * onLoadChildren's doc for both and the real-hardware history behind them,
+ * including a third design (EXTRA_BUTTON) that was built, tested, and
+ * removed outright as structurally unfixable.
+ *
+ * Reclassify (genre reassignment) lives on the now-playing template, not
+ * the browse grid — see handleReclassifyTap's doc for why that placement
+ * was chosen deliberately over a dedicated picker screen: the track that
+ * needs a new genre is already the one on screen the instant a tile is
+ * tapped, so there's nothing to re-select. Unverified until tested on real
+ * hardware — the underlying custom-action mechanism is the same one
+ * EXTRA_BUTTON already confirmed *renders and is tappable* on this head
+ * unit, just applied to an effect (metadata on the same screen) instead of
+ * the one (repainting a different screen) that made EXTRA_BUTTON fail.
  */
 class AutoMediaService : MediaBrowserServiceCompat() {
 
@@ -49,6 +71,18 @@ class AutoMediaService : MediaBrowserServiceCompat() {
     @Volatile
     private var lastRows: Map<String, Favorites.Fav> = emptyMap()
 
+    // Whichever track is actually on the now-playing screen right now —
+    // what handleReclassifyTap acts on. Set at the top of playAndReport
+    // (the instant a tile is tapped, not gated on playback confirmation, so
+    // reclassify is available the whole time the buffering/confirming
+    // screen is showing), cleared by handleRefreshTap since that screen
+    // shows "Refreshed" rather than any specific track's info — no track on
+    // screen, no reclassify action offered. Deliberately not lastRows
+    // (every tile ever shown, keyed by mediaId): this is the one currently
+    // in focus, not a lookup table.
+    @Volatile
+    private var currentFav: Favorites.Fav? = null
+
     private val pollHandler = Handler(Looper.getMainLooper())
 
     // Bumped at the start of every playAndReport() call; each poll tick
@@ -58,19 +92,31 @@ class AutoMediaService : MediaBrowserServiceCompat() {
     @Volatile
     private var playGeneration = 0
 
-    // Purely for the "load #N" log line — confirmed real-hardware evidence
-    // that gearhead calls onLoadChildren(refresh) once, automatically,
-    // right after root loads (before any tap), almost certainly an eager
-    // pre-fetch of the browsable folder's contents for preview purposes.
+    // Purely for the "load #N" log line.
     @Volatile
     private var loadCounter = 0
 
     companion object {
         private const val ROOT_ID = "root"
-        // Not a fixed id — see the class doc on onLoadChildren for why a
-        // constant id here was itself the bug.
+
+        // Model LEGACY's Refresh tile id — a single FLAG_PLAYABLE tile,
+        // fixed id is fine here since (unlike IN_PLACE's browsable node)
+        // gearhead never treats a playable tap as an already-answered
+        // subscription.
+        private const val REFRESH_KEY = "__refresh__"
+
+        // Model IN_PLACE's Refresh tile id prefix — minted fresh per load
+        // (see onLoadChildren) so gearhead can't treat a repeat tap as an
+        // already-answered subscription, the same reasoning a fixed id
+        // failed on the first time this design was tried (before LEGACY
+        // existed).
         private const val REFRESH_PREFIX = "refresh_"
-        private const val RESUME_KEY = "__resume__"
+
+        // Reclassify's trigger — a PlaybackStateCompat custom action on the
+        // now-playing template, the same mechanism EXTRA_BUTTON used (and
+        // confirmed renders/is tappable on real hardware) before it was
+        // removed for a different reason. See handleReclassifyTap.
+        private const val ACTION_RECLASSIFY = "com.ytmlauncher.action.RECLASSIFY"
 
         private const val POLL_INTERVAL_MS = 1000L
         private const val POLL_TIMEOUT_MS = 10_000L
@@ -94,17 +140,29 @@ class AutoMediaService : MediaBrowserServiceCompat() {
                 PlaybackStateCompat.Builder()
                     .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID)
                     .setState(PlaybackStateCompat.STATE_NONE, 0, 1f)
+                    .withReclassifyAction()
                     .build()
             )
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
                     ProbeLog.w(this@AutoMediaService, "AutoMediaService: onPlayFromMediaId($mediaId)")
+                    if (mediaId == REFRESH_KEY) {
+                        handleRefreshTap()
+                        return
+                    }
                     val f = lastRows[mediaId]
                     if (f == null) {
                         ProbeLog.w(this@AutoMediaService, "AutoMediaService: unrecognized mediaId, ignoring")
                         return
                     }
                     playAndReport(f)
+                }
+
+                override fun onCustomAction(action: String?, extras: Bundle?) {
+                    ProbeLog.w(this@AutoMediaService, "AutoMediaService: onCustomAction($action)")
+                    if (action == ACTION_RECLASSIFY) {
+                        handleReclassifyTap()
+                    }
                 }
             })
             isActive = true
@@ -125,45 +183,85 @@ class AutoMediaService : MediaBrowserServiceCompat() {
         // Hints only — gearhead still owns the final layout (column count,
         // exact tile chrome), but without this the root defaults to a plain
         // list instead of the image-forward grid the tile art below is
-        // designed for.
+        // designed for. CATEGORY_GRID_ITEM, not the plain GRID_ITEM this had
+        // before: on the CX-60 (a smaller/older head unit than the GLE63s
+        // this was first tuned on) GRID_ITEM rendered only two oversized
+        // tiles per row. CATEGORY_GRID_ITEM is the only other density this
+        // API exposes — there is no numeric tile-size hint, this is a style
+        // enum, not a dimension — and is documented for denser tile shelfs.
+        // Unverified on real hardware yet; if it reflows into a horizontal
+        // scroller instead of a denser vertical grid, that's the tradeoff
+        // of the only lever available (see this file's other "platform
+        // boundary" notes on what gearhead does vs. doesn't let this app
+        // control).
         val extras = Bundle().apply {
             putInt(
                 MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
-                MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+                MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_CATEGORY_GRID_ITEM
             )
             putInt(
                 MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
-                MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+                MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_CATEGORY_GRID_ITEM
             )
         }
         return BrowserRoot(ROOT_ID, extras)
     }
 
     /**
-     * Answers ROOT_ID and any REFRESH_PREFIX-tagged id with a fresh shuffle
-     * — Refresh is a FLAG_BROWSABLE node, not a FLAG_PLAYABLE one: on real
-     * hardware, tapping any playable item unconditionally sent gearhead to
-     * its now-playing template first, before onPlayFromMediaId even runs —
-     * so a playable Refresh with nothing behind it "failed" exactly like a
-     * normal selection tap would. Its result omits a further Refresh tile
-     * (only ROOT_ID gets one) — offering one there let real-hardware taps
-     * drill an unbounded number of levels deeper, with no way back except
-     * repeated Back presses.
+     * Refresh went through two failed designs before LEGACY (the first
+     * design that actually worked end to end on real hardware), both worth
+     * recording so a future session doesn't retry them as-is:
      *
-     * The id is minted fresh (a timestamp suffix) every time ROOT_ID is
-     * built, not a fixed "refresh" constant like the first version of this
-     * had. Real-hardware evidence (a log showing onLoadChildren(refresh)
-     * firing exactly once, automatically, right after root — before any
-     * tap) points to gearhead eagerly pre-fetching a browsable folder's
-     * contents for preview purposes, then treating a later tap on that same
-     * id as already-answered and never calling onLoadChildren again. A
-     * constant id can only ever be genuinely fresh once; a minted-per-load
-     * id means gearhead has never subscribed to *this* one before, so the
-     * eager pre-fetch (if it still happens) can't go stale by the time it's
-     * actually tapped.
+     * 1. A single fixed FLAG_PLAYABLE tile, doing nothing to playback
+     *    state. Tapping any playable item unconditionally sends gearhead to
+     *    its now-playing template first, before onPlayFromMediaId even
+     *    runs — a playable Refresh with nothing behind it "failed" exactly
+     *    like a normal selection tap, indistinguishable from a bug.
+     * 2. FLAG_BROWSABLE with a fixed id ("refresh"). Real-hardware testing
+     *    showed pressing it did nothing visible at all — no screen change,
+     *    repeat taps never re-triggered onLoadChildren. Suspected cause:
+     *    gearhead treating a fixed, previously-seen id as an
+     *    already-answered subscription and never re-querying it — which is
+     *    why IN_PLACE below mints a fresh id every load instead.
+     *
+     * IMPORTANT — a claim that used to live here was WRONG and cost a real
+     * regression: it asserted that Back-from-the-playback-template
+     * automatically forces gearhead to re-call onLoadChildren(ROOT_ID) on
+     * its own, with no explicit notifyChildrenChanged needed. Real-device
+     * log evidence (probe.log, 2026-08-30 12:59-13:01) disproves this:
+     * across 4 Refresh taps and 2 ordinary track taps in one session,
+     * onLoadChildren(root) was never invoked again after gearhead's own two
+     * automatic calls at startup. Conclusion: gearhead never re-queries a
+     * subscribed browse node on its own. notifyChildrenChanged(parentId) —
+     * called explicitly by this app — is the only thing that does it, for
+     * any parentId, at any time. All three models below, and playAndReport
+     * for ordinary track taps, rely on that.
+     *
+     * The two live designs, chosen via Store.getRefreshModel() (see its
+     * doc for the full picture, including why a third design —
+     * EXTRA_BUTTON, a custom now-playing-template action — was built,
+     * tested, and then removed rather than kept as an option — this is the
+     * onLoadChildren-specific half):
+     *
+     *  LEGACY — a fixed FLAG_PLAYABLE tile (REFRESH_KEY). Real-hardware
+     *  verified working: see handleRefreshTap.
+     *
+     *  IN_PLACE (default) — a FLAG_BROWSABLE tile, id minted fresh every load
+     *  (REFRESH_PREFIX + a timestamp) so a repeat tap can never look like an
+     *  already-answered subscription to gearhead. This method answers any
+     *  REFRESH_PREFIX-prefixed parentId with the exact same freshly-shuffled
+     *  content as ROOT_ID (same code path below, just a different id on the
+     *  Refresh tile it emits) — so the pushed child screen looks identical
+     *  to root, just reshuffled. Known tradeoff, kept deliberately rather
+     *  than solved: each tap pushes one more browse-stack frame, so
+     *  refreshing N times from inside a child screen costs N extra Back
+     *  presses to reach Home. Root itself stays stale until the user backs
+     *  all the way out to it — notifyChildrenChanged below only targets
+     *  ROOT_ID, not whichever child id is currently on screen.
      */
     override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaItem>>) {
-        if (parentId != ROOT_ID && !parentId.startsWith(REFRESH_PREFIX)) {
+        val isRefreshChild = parentId.startsWith(REFRESH_PREFIX)
+        if (parentId != ROOT_ID && !isRefreshChild) {
             result.sendResult(mutableListOf())
             return
         }
@@ -177,27 +275,30 @@ class AutoMediaService : MediaBrowserServiceCompat() {
             val all = Favorites.all(this).filter { it.videoId.isNotBlank() }
             val seed = Store.loadMixSeed(this)
 
-            // Exclude the Resume track from every genre's candidate pool
-            // before shuffling, not after picking — so a genre with other
-            // eligible tracks still gets a tile (just a different one)
-            // instead of silently rendering the same track twice. A genre
-            // only drops out entirely if the Resume track was its sole
-            // resolved favorite.
-            val excludeKey = seed?.let { Favorites.keyFor(it.title, it.artist) }
-            val picks = Favorites.GENRES.mapNotNull { genre ->
-                all.filter { it.genre == genre && it.key != excludeKey }
-                    .shuffled().firstOrNull()
-            }
+            // The currently-playing (or last-played) track, if it's itself
+            // a favorite with a genre tagged — used below to relocate that
+            // genre's tile instead of adding a separate "Resume" tile. Null
+            // whenever there's no seed, or the seed's track isn't a tagged
+            // favorite; both leave the grid in plain GENRES order with no
+            // highlighted tile, same as before there was any seed at all.
+            val seedKey = seed?.let { Favorites.keyFor(it.title, it.artist) }
+            val seedFav = seedKey?.let { k -> all.firstOrNull { it.key == k } }
+            val seedGenre = seedFav?.genre?.takeIf { it.isNotBlank() }
 
-            val rows = if (seed != null && seed.videoId.isNotBlank()) {
-                listOf(
-                    Favorites.Fav(
-                        key = RESUME_KEY, title = seed.title, artist = seed.artist, album = "",
-                        durationMs = 0L, videoId = seed.videoId, addedAt = 0L, lastSeenAt = 0L,
-                        playCount = 0, genre = "Resume"
-                    )
-                ) + picks
-            } else picks
+            // seedGenre's slot is forced to seedFav rather than shuffled —
+            // that's the "now playing" tile. Every other genre still
+            // excludes seedKey from its own candidate pool before shuffling
+            // (not after picking), so a genre with other eligible tracks
+            // still gets a tile instead of silently duplicating the seed's
+            // track, and only drops out entirely if the seed was its sole
+            // resolved favorite.
+            val orderedGenres = if (seedGenre != null) {
+                listOf(seedGenre) + Favorites.GENRES.filter { it != seedGenre }
+            } else Favorites.GENRES
+            val rows = orderedGenres.mapNotNull { genre ->
+                if (genre == seedGenre) seedFav
+                else all.filter { it.genre == genre && it.key != seedKey }.shuffled().firstOrNull()
+            }
 
             // Merged, not replaced — a confirmed real-hardware bug: gearhead
             // was calling onLoadChildren(refresh) automatically (an eager
@@ -212,16 +313,16 @@ class AutoMediaService : MediaBrowserServiceCompat() {
             lastRows = lastRows + rows.associateBy { it.key }
 
             // Every tile's art now gets fetched and composited by this app
-            // (a ring for Resume, a genre label for everything else)
-            // instead of left to gearhead's own async image loader via a
-            // plain setIconUri — fetching sequentially would multiply this
-            // screen's load time by roughly the tile count, so run them
-            // concurrently and wait for the slowest one instead of the sum
-            // of all of them.
+            // (a genre label always, plus a gold ring on whichever tile is
+            // seedFav) instead of left to gearhead's own async image loader
+            // via a plain setIconUri — fetching sequentially would multiply
+            // this screen's load time by roughly the tile count, so run
+            // them concurrently and wait for the slowest one instead of the
+            // sum of all of them.
             val pool = Executors.newFixedThreadPool(rows.size.coerceIn(1, 12))
             val arts = try {
                 rows.map { f ->
-                    pool.submit(Callable { if (f.key == RESUME_KEY) ringedArt(f.videoId) else genreTileArt(f.videoId, f.genre) })
+                    pool.submit(Callable { genreTileArt(f.videoId, f.genre, ringed = f.key == seedFav?.key) })
                 }.map { it.get() }
             } finally {
                 pool.shutdown()
@@ -229,26 +330,30 @@ class AutoMediaService : MediaBrowserServiceCompat() {
 
             val items = mutableListOf<MediaItem>()
 
-            // First position, not last: the service only controls list
-            // order, not which row/column a position lands in on a given
-            // head unit's grid — "last" was tried and didn't land at
-            // top-right on the GLE63s. "First" is the only corner this app
-            // can deterministically target (top-left of the grid), so it
-            // replaces that guess. Only offered at the true root — see this
-            // method's class doc for why REFRESH_ID's own result doesn't
-            // repeat it. Our own drawable, so the gold ring marking it (and
-            // Resume, below) as a control rather than a track is just a
-            // redesign of ic_refresh.xml — no compositing needed since we
-            // already own this bitmap outright.
-            if (parentId == ROOT_ID) {
-                val refreshDescription = MediaDescriptionCompat.Builder()
-                    .setMediaId("$REFRESH_PREFIX${System.currentTimeMillis()}")
-                    .setTitle("Refresh")
-                    .setSubtitle("Reshuffle favorites")
-                    .setIconUri(Uri.parse("android.resource://$packageName/${R.drawable.ic_refresh}"))
-                    .build()
-                items.add(MediaItem(refreshDescription, MediaItem.FLAG_BROWSABLE))
-            }
+            // First position: the service only controls list order, not
+            // which row/column a position lands in on a given head unit's
+            // grid — "first" is the only corner this app can deterministically
+            // target (top-left). LEGACY uses a fixed id and FLAG_PLAYABLE;
+            // IN_PLACE uses a freshly-minted id and FLAG_BROWSABLE — see
+            // this method's class doc for both. Our own drawable either
+            // way, so the gold ring marking it as a control rather than a
+            // track is just a redesign of ic_refresh.xml — no compositing
+            // needed since we already own this bitmap outright. The
+            // now-playing tile (which follows it, when seedGenre is
+            // non-null) gets its ring composited onto real fetched art
+            // instead, since unlike Refresh it's a real track.
+            val refreshModel = Store.getRefreshModel(this)
+            val refreshId = if (refreshModel == Store.RefreshModel.IN_PLACE)
+                "$REFRESH_PREFIX${System.currentTimeMillis()}" else REFRESH_KEY
+            val refreshFlag = if (refreshModel == Store.RefreshModel.IN_PLACE)
+                MediaItem.FLAG_BROWSABLE else MediaItem.FLAG_PLAYABLE
+            val refreshDescription = MediaDescriptionCompat.Builder()
+                .setMediaId(refreshId)
+                .setTitle("Refresh")
+                .setSubtitle("Reshuffle favorites")
+                .setIconUri(Uri.parse("android.resource://$packageName/${R.drawable.ic_refresh}"))
+                .build()
+            items.add(MediaItem(refreshDescription, refreshFlag))
 
             rows.forEachIndexed { i, f ->
                 val artUri = "https://i.ytimg.com/vi/${f.videoId}/hqdefault.jpg"
@@ -284,9 +389,9 @@ class AutoMediaService : MediaBrowserServiceCompat() {
      * (ring vs. genre label) on every single onLoadChildren call, including
      * Refresh, which recomputes the whole screen. Caching the decoded
      * source bitmap by videoId means only genuinely new tracks pay for a
-     * network round trip; ringedArt/genreTileArt still composite fresh
-     * every time since the ring/label drawing itself is cheap (~ms) and the
-     * two need different pixels. Unbounded for the lifetime of the process
+     * network round trip; genreTileArt still composites fresh every time
+     * since the ring/label drawing itself is cheap (~ms). Unbounded for the
+     * lifetime of the process
      * — the working set is just however many distinct favorites have been
      * shown, not worth evicting for an app this size.
      */
@@ -309,45 +414,22 @@ class AutoMediaService : MediaBrowserServiceCompat() {
     }
 
     /**
-     * Burns a gold ring into the shared source art, so Resume reads as a
-     * control rather than an ordinary track tile even though (unlike
-     * Refresh) its art is a real remote photo, not a bitmap this app
-     * already owns. Runs on onLoadChildren's background thread. Best-effort:
-     * any failure (network, decode) returns null and the caller falls back
-     * to the plain remote URI.
+     * Bakes a bottom gradient scrim and the genre name directly into the
+     * pixels. Requested after real-hardware testing where the genre —
+     * carried only in setSubtitle() — either wasn't rendered on the tile at
+     * all or wasn't legible against bright art; gearhead owns whatever
+     * chrome it puts around a tile's title/subtitle, so the only way to
+     * *guarantee* legible genre text is to own those pixels ourselves.
+     * `ringed` additionally burns the same gold stroke Refresh's drawable
+     * carries onto this tile, marking it as "now playing" — used for
+     * exactly one tile per load (whichever one is seedFav in
+     * onLoadChildren), never as a second separate tile with different text,
+     * so the now-playing tile stays visually identical to every other genre
+     * tile aside from the border. Best-effort: any failure returns null and
+     * the caller falls back to the plain remote URI, same as before this
+     * app started compositing art itself.
      */
-    private fun ringedArt(videoId: String): Bitmap? {
-        return try {
-            val source = fetchSourceArt(videoId) ?: return null
-            val ringed = source.copy(Bitmap.Config.ARGB_8888, true)
-            val strokeWidth = ringed.width * 0.05f
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                this.strokeWidth = strokeWidth
-                color = Color.parseColor("#E7B455")
-            }
-            val inset = strokeWidth / 2
-            Canvas(ringed).drawRect(inset, inset, ringed.width - inset, ringed.height - inset, paint)
-            ringed
-        } catch (e: Exception) {
-            ProbeLog.w(this, "AutoMediaService: resume art ring failed: ${e.message}")
-            null
-        }
-    }
-
-    /**
-     * Same fetch as ringedArt, but bakes a bottom gradient scrim and the
-     * genre name directly into the pixels instead of a ring. Requested
-     * after real-hardware testing where the genre — carried only in
-     * setSubtitle() — either wasn't rendered on the tile at all or wasn't
-     * legible against bright art; gearhead owns whatever chrome it puts
-     * around a tile's title/subtitle, so the only way to *guarantee*
-     * legible genre text is to own those pixels ourselves, the same
-     * reasoning as the Resume ring above. Best-effort: any failure returns
-     * null and the caller falls back to the plain remote URI, same as
-     * before this app started compositing art itself.
-     */
-    private fun genreTileArt(videoId: String, genre: String): Bitmap? {
+    private fun genreTileArt(videoId: String, genre: String, ringed: Boolean = false): Bitmap? {
         return try {
             val source = fetchSourceArt(videoId) ?: return null
             val out = source.copy(Bitmap.Config.ARGB_8888, true)
@@ -372,11 +454,127 @@ class AutoMediaService : MediaBrowserServiceCompat() {
             }
             val padding = out.width * 0.06f
             canvas.drawText(genre.uppercase(), padding, out.height - padding, textPaint)
+
+            if (ringed) {
+                val strokeWidth = out.width * 0.05f
+                val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.STROKE
+                    this.strokeWidth = strokeWidth
+                    color = Color.parseColor("#E7B455")
+                }
+                val inset = strokeWidth / 2
+                canvas.drawRect(inset, inset, out.width - inset, out.height - inset, ringPaint)
+            }
+
             out
         } catch (e: Exception) {
             ProbeLog.w(this, "AutoMediaService: genre tile art failed: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Model LEGACY only. Real-hardware verified working end to end (this is
+     * the design actually shipped and confirmed by the user before IN_PLACE
+     * was built and made the default instead). Forces gearhead's
+     * now-playing template (unavoidable for any FLAG_PLAYABLE tap) with
+     * "Refreshed" metadata rather than leaving whatever the previous
+     * track's title was sitting there — the confused-looking "frozen
+     * 0:00/0:00" screen this replaced was a real track's stale metadata
+     * paired with STATE_STOPPED, not a truly blank state; labeling it
+     * removes the ambiguity even though the screen transition itself isn't
+     * avoidable in this model (that's exactly what IN_PLACE trades a new
+     * browse-stack frame plus an unremovable back arrow to avoid — see
+     * Store.RefreshModel). notifyChildrenChanged(ROOT_ID) is the only thing
+     * that makes gearhead
+     * re-query root at all (see onLoadChildren's class doc) — safe to call
+     * here since it's one real tap driving one call, not a self-triggering
+     * loop.
+     */
+    private fun handleRefreshTap() {
+        ProbeLog.w(this, "AutoMediaService: refresh tapped")
+        notifyChildrenChanged(ROOT_ID)
+        // No specific track is on screen after this — clears the Reclassify
+        // action along with it (see withReclassifyAction/currentFav's doc).
+        currentFav = null
+        mediaSession.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "Refreshed")
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Tap ← to browse the new picks")
+                .build()
+        )
+        mediaSession.setPlaybackState(buildState(PlaybackStateCompat.STATE_STOPPED))
+    }
+
+    /**
+     * Shared by playAndReport (initial tap) and handleReclassifyTap (after
+     * changing the genre) so both build the exact same shape of metadata —
+     * genre is folded into the artist line ("Artist  ·  Genre"), the same
+     * "subtitle" convention onLoadChildren already uses for browse tiles,
+     * rather than a separate field this template has no slot for. This
+     * doubles as the "current genre" indicator for Reclassify: since there's
+     * no picker list on this screen (see handleReclassifyTap's doc for why),
+     * seeing it update here on every tap is the closest equivalent to a
+     * highlighted selection this template supports.
+     */
+    private fun nowPlayingMetadata(f: Favorites.Fav): MediaMetadataCompat =
+        MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, f.title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "${f.artist}  ·  ${f.genre.ifBlank { "Uncategorized" }}")
+            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, f.album)
+            // Public, unauthenticated YouTube thumbnail URL pattern — no new
+            // dependency or InnerTube call. Gearhead's own image loader
+            // fetches it, not this process, the same division of
+            // responsibility the bundled ic_play icon URI already relies
+            // on, just remote instead of a local resource — unverified on
+            // real hardware as of this writing.
+            .putString(MediaMetadataCompat.METADATA_KEY_ART_URI, "https://i.ytimg.com/vi/${f.videoId}/hqdefault.jpg")
+            .build()
+
+    /**
+     * Reclassify — cycles currentFav's genre forward through
+     * Favorites.GENRES (wrapping) on every tap, persists it immediately via
+     * Favorites.setGenre, and repaints this same now-playing screen with
+     * the result. Deliberately not a separate picker screen the way
+     * LaunchActivity's long-press dialog works on the phone, for two
+     * reasons:
+     *
+     * 1. Android Auto's browse tiles don't expose a long-press gesture at
+     *    all — nothing in androidx.media/media3/Car App Library gives a
+     *    MediaItem a secondary tap, and one would cut against the
+     *    driving-distraction-minimized design this whole surface already
+     *    defers to (see CLAUDE.md's "Platform boundary" section).
+     * 2. The track that needs reclassifying is already the one on screen
+     *    the instant its tile is tapped — routing through a separate "pick
+     *    a track" screen first would make the user re-find something they
+     *    just selected, the opposite of the goal.
+     *
+     * One tap per step through the fixed list (GENRES.size - 1 taps worst
+     * case) rather than a scrollable picker, the same toggle idiom Settings
+     * already uses for RefreshModel — and this reuses an established,
+     * real-hardware-confirmed-tappable mechanism (the exact
+     * PlaybackStateCompat custom-action machinery EXTRA_BUTTON proved
+     * renders and responds to taps on this head unit) rather than betting
+     * on an unverified per-item browse action or an unverified multi-button
+     * layout. Reads mediaSession.controller.playbackState back rather than
+     * assuming STATE_STOPPED, so a reclassify tap mid-buffering or
+     * mid-error doesn't silently overwrite that state.
+     */
+    private fun handleReclassifyTap() {
+        val f = currentFav ?: return
+        val next = Favorites.nextGenre(f.genre)
+        Favorites.setGenre(this, f.key, next)
+        ProbeLog.w(this, "AutoMediaService: reclassified ${f.label()} -> $next")
+
+        val updated = f.copy(genre = next)
+        currentFav = updated
+        mediaSession.setMetadata(nowPlayingMetadata(updated))
+        mediaSession.setPlaybackState(
+            buildState(mediaSession.controller.playbackState?.state ?: PlaybackStateCompat.STATE_STOPPED)
+        )
+        // So the tile's new genre slot is reflected once the user backs out
+        // — same pattern playAndReport/handleRefreshTap already use.
+        notifyChildrenChanged(ROOT_ID)
     }
 
     /**
@@ -399,21 +597,11 @@ class AutoMediaService : MediaBrowserServiceCompat() {
     private fun playAndReport(f: Favorites.Fav) {
         val generation = ++playGeneration
 
-        mediaSession.setMetadata(
-            MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, f.title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, f.artist)
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, f.album)
-                // Public, unauthenticated YouTube thumbnail URL pattern — no
-                // new dependency or InnerTube call. Gearhead's own image
-                // loader fetches it, not this process, the same division of
-                // responsibility the bundled ic_play icon URI already
-                // relies on, just remote instead of a local resource this
-                // time — first remote URI this codebase has fed a
-                // MediaSession, unverified until seen on real hardware.
-                .putString(MediaMetadataCompat.METADATA_KEY_ART_URI, "https://i.ytimg.com/vi/${f.videoId}/hqdefault.jpg")
-                .build()
-        )
+        // The track now on screen — what Reclassify (see currentFav's doc)
+        // acts on. Set before anything else here so it's available for the
+        // very first buildState() call below.
+        currentFav = f
+        mediaSession.setMetadata(nowPlayingMetadata(f))
         mediaSession.setPlaybackState(buildState(PlaybackStateCompat.STATE_BUFFERING))
 
         val live = Probes.ytmController(this) != null
@@ -423,6 +611,19 @@ class AutoMediaService : MediaBrowserServiceCompat() {
         // SessionLogger's auto-continue stays consistent with what was
         // actually played from this surface).
         Probes.playFavorite(this, f.title, f.artist, f.videoId)
+
+        // The seed is saved (synchronously, above) the instant a tile is
+        // tapped, regardless of whether playback ever gets confirmed — so
+        // root's now-playing tile (whichever genre f belongs to) is already
+        // knowable now, not just after the poll below confirms. Triggering
+        // this immediately, not gated on confirmation, means the reshuffle
+        // runs in the background while the user is looking at the
+        // now-playing template and is ready by the time they press Back —
+        // same pattern handleRefreshTap uses, and for the same reason: this
+        // was previously missing entirely (never present, not just
+        // regressed), which is why a plain track tap + Back left root
+        // showing the pre-tap shuffle with the old track still ringed.
+        notifyChildrenChanged(ROOT_ID)
 
         if (!live) {
             // Genuinely unverified cold-start path — see ytmprobe/FINDINGS.md
@@ -492,8 +693,30 @@ class AutoMediaService : MediaBrowserServiceCompat() {
         val builder = PlaybackStateCompat.Builder()
             .setActions(PlaybackStateCompat.ACTION_PLAY)
             .setState(state, 0, 1f)
+            .withReclassifyAction()
         if (errorMessage != null) builder.setErrorMessage(errorMessage)
         return builder.build()
+    }
+
+    /**
+     * Adds the Reclassify custom action whenever a specific track is
+     * actually on screen (currentFav != null) — a no-op otherwise (the
+     * initial idle state before any tap, and handleRefreshTap's "Refreshed"
+     * screen, which clears currentFav for exactly this reason). Label
+     * carries the current genre directly ("Genre: Rock") so it also serves
+     * as the "what's it set to right now" readout — see
+     * handleReclassifyTap's doc for the full reasoning on this design.
+     */
+    private fun PlaybackStateCompat.Builder.withReclassifyAction(): PlaybackStateCompat.Builder {
+        val f = currentFav ?: return this
+        addCustomAction(
+            PlaybackStateCompat.CustomAction.Builder(
+                ACTION_RECLASSIFY,
+                "Genre: ${f.genre.ifBlank { "Uncategorized" }}",
+                R.drawable.ic_genre
+            ).build()
+        )
+        return this
     }
 
     override fun onDestroy() {
